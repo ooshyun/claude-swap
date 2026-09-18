@@ -1708,3 +1708,70 @@ class TestThemeWiring:
             assert app._theme_name == "light"
             assert app.theme == "cswap-light"
 
+
+@pytest.mark.asyncio
+class TestSettingInputModal:
+    async def _push(self, app, spec_key: str, current: str):
+        from claude_swap.settings import SETTING_SPECS
+        from claude_swap.tui.modals import SettingInputModal
+
+        results: list = []
+        app.push_screen(
+            SettingInputModal(SETTING_SPECS[spec_key], current, "2 · b@example.com"),
+            results.append,
+        )
+        return results
+
+    async def test_enter_valid_value_dismisses_with_edit(self, tmp_path):
+        from textual.widgets import Input
+
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            results = await self._push(app, "autoswitch.threshold", "90")
+            await pilot.pause()
+            box = app.screen.query_one("#value", Input)
+            assert box.value == "90"
+            box.value = "75"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results and results[0].value == "75"
+
+    async def test_out_of_range_shows_error_and_stays(self, tmp_path):
+        from textual.widgets import Input, Static
+
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            results = await self._push(app, "autoswitch.threshold", "90")
+            await pilot.pause()
+            app.screen.query_one("#value", Input).value = "120"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == []
+            err = app.screen.query_one("#form-error", Static).render().plain
+            assert "between 50 and 99.9" in err
+
+    async def test_empty_value_means_clear(self, tmp_path):
+        from textual.widgets import Input
+
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            results = await self._push(app, "autoswitch.model", "Fable")
+            await pilot.pause()
+            app.screen.query_one("#value", Input).value = ""
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results and results[0].value is None
+
+    async def test_escape_cancels(self, tmp_path):
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            results = await self._push(app, "autoswitch.model", "Fable")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [None]
+

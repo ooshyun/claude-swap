@@ -11,6 +11,9 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
+from claude_swap.exceptions import ConfigError
+from claude_swap.settings import SettingSpec, format_setting_value, parse_setting_value
+
 
 class ConfirmModal(ModalScreen[bool]):
     """Yes/No confirmation. Dismisses with True only on explicit confirm.
@@ -128,6 +131,85 @@ class AddTokenModal(ModalScreen["TokenForm | None"]):
                 self.query_one("#form-error", Static).update("Slot must be >= 1.")
                 return
         self.dismiss(TokenForm(token=token, email=email, slot=slot))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass
+class SettingEdit:
+    """What the setting modal returns: a raw value to store, or None = clear."""
+
+    value: str | None
+
+
+class SettingInputModal(ModalScreen["SettingEdit | None"]):
+    """Edit one autoswitch setting for one scope (global or an account).
+
+    Validation is ``parse_setting_value`` — the same rule ``cswap config set``
+    applies — so the TUI can never store what the CLI would reject. An empty
+    submission means "clear" (unset / drop the override); Esc cancels.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("left", "app.focus_previous", show=False),
+        Binding("right", "app.focus_next", show=False),
+    ]
+
+    def __init__(self, spec: SettingSpec, current: str, scope_label: str) -> None:
+        super().__init__()
+        self._spec = spec
+        self._current = current
+        self._scope_label = scope_label
+
+    def _range_hint(self) -> str:
+        spec = self._spec
+        if spec.kind in ("float", "int") and spec.lo is not None:
+            return f"{format_setting_value(spec.lo)}–{format_setting_value(spec.hi)}"
+        if spec.kind == "choice":
+            return " / ".join(spec.choices)
+        if spec.dotted == "autoswitch.model":
+            return "model name(s), e.g. Fable or Fable,Opus — or all"
+        return ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box"):
+            yield Label(f"{self._spec.dotted} · {self._scope_label}", classes="modal-title")
+            yield Static(self._spec.help, classes="modal-body")
+            yield Input(value=self._current, placeholder=self._range_hint(), id="value")
+            yield Static("", id="form-error", classes="form-error")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Save", id="save")
+                yield Button("Cancel", id="cancel")
+            yield Static(
+                f"enter save  ·  empty = clear ({self._range_hint() or 'any'})  ·  esc cancel",
+                classes="modal-hint",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#value", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        raw = self.query_one("#value", Input).value.strip()
+        if not raw:
+            self.dismiss(SettingEdit(value=None))
+            return
+        try:
+            parse_setting_value(self._spec, raw)
+        except ConfigError as exc:
+            self.query_one("#form-error", Static).update(str(exc))
+            return
+        self.dismiss(SettingEdit(value=raw))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
