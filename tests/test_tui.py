@@ -26,6 +26,10 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui import data as tui_data
 from claude_swap.usage_store import UsageEntry
 
+#: FakeSwitcher's own "argument not passed" sentinel for
+#: set_account_autoswitch_override, mirroring switcher._UNSET.
+_UNSET = object()
+
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -121,6 +125,7 @@ class FakeSwitcher:
         )
         self.calls: list[tuple] = []
         self.fetch_sets: list[set[str] | None] = []
+        self.overrides: dict[str, dict] = {}
 
     # -- surface the TUI consumes ------------------------------------------
 
@@ -194,6 +199,28 @@ class FakeSwitcher:
 
     def clear_poll_policy_inputs(self) -> None:
         self._poll_inputs_override = None
+
+    def account_autoswitch_overrides(self) -> dict[str, dict]:
+        return {a.number: dict(self.overrides.get(a.number, {})) for a in self._accounts}
+
+    def account_autoswitch_override(self, account_num: str) -> dict:
+        return dict(self.overrides.get(str(account_num), {}))
+
+    def set_account_autoswitch_override(self, identifier, *, threshold=_UNSET, model=_UNSET):
+        self.calls.append(("set_override", str(identifier), threshold, model))
+        cur = dict(self.overrides.get(str(identifier), {}))
+        for key, val in (("threshold", threshold), ("model", model)):
+            if val is _UNSET:
+                continue
+            if val is None:
+                cur.pop(key, None)
+            else:
+                cur[key] = float(val) if key == "threshold" else str(val)
+        if cur:
+            self.overrides[str(identifier)] = cur
+        else:
+            self.overrides.pop(str(identifier), None)
+        return cur
 
 
 class BlockingSnapshotSwitcher(FakeSwitcher):
@@ -1774,4 +1801,119 @@ class TestSettingInputModal:
             await pilot.press("escape")
             await pilot.pause()
             assert results == [None]
+
+
+@pytest.mark.asyncio
+class TestConfigScreen:
+    async def _open(self, app, pilot):
+        from claude_swap.tui.config_screen import ConfigScreen
+
+        results: list = []
+        await settle(pilot)
+        app.push_screen(ConfigScreen(), results.append)
+        await pilot.pause()
+        await pilot.pause()  # on_mount schedules _rebuild via call_later
+        return results
+
+    def _rows(self, app):
+        from textual.widgets import ListView
+
+        from claude_swap.tui.config_screen import ConfigRow
+
+        return list(app.screen.query_one("#config-list", ListView).query(ConfigRow))
+
+    async def test_table_shows_global_then_accounts_with_inherit_marker(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        fake.overrides["2"] = {"threshold": 80.0}
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(app, pilot)
+            rows = self._rows(app)
+            assert [r.scope for r in rows] == ["global", "1", "2"]
+            plain = [r.render_label().plain for r in rows]
+            assert "90" in plain[0] and "(default)" in plain[0]
+            assert "(global)" in plain[1]
+            assert "80" in plain[2] and "(global)" in plain[2]  # model still inherits
+
+    async def test_t_on_account_row_saves_override_and_marks_dirty(self, tmp_path):
+        from textual.widgets import Input, ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results = await self._open(app, pilot)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            app.screen.query_one("#value", Input).value = "75"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert ("set_override", "2", "75", _UNSET) in fake.calls
+            plain = self._rows(app)[2].render_label().plain
+            assert "75" in plain
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [True]
+
+    async def test_m_on_global_row_writes_settings_file(self, tmp_path):
+        from textual.widgets import Input
+
+        from claude_swap.settings import load_settings
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press("m")   # index 0 = global
+            await pilot.pause()
+            app.screen.query_one("#value", Input).value = "Fable"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert load_settings(tmp_path).model == "Fable"
+
+    async def test_empty_value_clears_account_override(self, tmp_path):
+        from textual.widgets import Input, ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        fake.overrides["2"] = {"threshold": 80.0}
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(app, pilot)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            app.screen.query_one("#value", Input).value = ""
+            await pilot.press("enter")
+            await pilot.pause()
+            assert fake.overrides == {}
+
+    async def test_r_confirms_then_resets_both_keys(self, tmp_path):
+        from textual.widgets import ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        fake.overrides["2"] = {"threshold": 80.0, "model": "Fable"}
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(app, pilot)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            from claude_swap.tui.modals import ConfirmModal
+
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("y")
+            await pilot.pause()
+            assert fake.overrides == {}
+
+    async def test_escape_without_changes_is_not_dirty(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results = await self._open(app, pilot)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [False]
 
