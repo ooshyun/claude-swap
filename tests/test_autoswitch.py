@@ -2231,7 +2231,9 @@ class TestSessionThreshold:
         harness.engine.apply_threshold(72.0)
         assert harness.engine.settings.threshold == 72.0
         # Poll-cadence planning follows the new value immediately.
-        assert harness.switcher._poll_inputs_override == (72.0, ())
+        default, per_account = harness.switcher._poll_inputs_override
+        assert default == (72.0, ())
+        assert per_account == {}
         # And the very next tick decides with it: 80% ≥ 72 switches, where
         # the constructed 90 would not have.
         outcome = harness.tick_with_usage({
@@ -2243,6 +2245,27 @@ class TestSessionThreshold:
         harness.engine.apply_threshold(72.0)
         harness.switcher.clear_poll_policy_inputs()
         assert harness.switcher._poll_inputs_override is None
+
+    def test_engine_pins_per_account_poll_inputs(self, temp_home):
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com", override={"threshold": 70, "model": "Fable"})
+        h.make_live("a@example.com", 1)
+        h.rebuild_engine()
+        default, per_account = h.switcher._poll_inputs_override
+        assert default == (90.0, ())
+        assert per_account == {"2": (70.0, ("Fable",))}
+
+    def test_apply_threshold_repins_default_only(self, temp_home):
+        h = EngineHarness(temp_home)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com", override={"threshold": 70})
+        h.make_live("a@example.com", 1)
+        h.rebuild_engine()
+        h.engine.apply_threshold(60.0)
+        default, per_account = h.switcher._poll_inputs_override
+        assert default == (60.0, ())
+        assert per_account == {"2": (70.0, ())}
 
     def _collect_fetch_sets(self, harness, threshold: float) -> list:
         entries = {

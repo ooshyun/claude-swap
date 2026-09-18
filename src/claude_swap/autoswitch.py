@@ -52,7 +52,7 @@ from claude_swap.poll_policy import (
     binding_pct,
 )
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.switcher import ClaudeAccountSwitcher, PollInputs
 from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
 
 STATE_FILENAME = "autoswitch_state.json"
@@ -683,7 +683,7 @@ class AutoSwitchEngine:
         # Poll plans written by the collector must key on the same threshold/
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
-        switcher.set_poll_policy_inputs(settings.threshold, self._models)
+        switcher.set_poll_policy_inputs(*self._poll_inputs())
         self.on_event = on_event
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)
@@ -712,6 +712,13 @@ class AutoSwitchEngine:
         )
 
     # -- per-account axes ---------------------------------------------------
+
+    def _poll_inputs(self) -> tuple[PollInputs, dict[str, PollInputs]]:
+        """The (default, per_account) poll keys matching this engine's axes."""
+        per_account: dict[str, PollInputs] = {}
+        for num in set(self._override_threshold) | set(self._override_models):
+            per_account[num] = (self._threshold_for(num), self._models_for(num))
+        return (self.settings.threshold, self._models), per_account
 
     def _threshold_for(self, num: str | None) -> float:
         """The threshold ``num`` is judged on: its override, else the global.
@@ -2339,7 +2346,7 @@ class AutoSwitchEngine:
         state) are fixed at construction. The frozen-settings swap is atomic
         and each tick snapshots ``self.settings`` once, so no locking."""
         self.settings = replace(self.settings, threshold=threshold)
-        self.switcher.set_poll_policy_inputs(threshold, self._models)
+        self.switcher.set_poll_policy_inputs(*self._poll_inputs())
 
     def _next_delay(self, outcome: TickOutcome) -> float:
         interval = self.settings.interval_seconds

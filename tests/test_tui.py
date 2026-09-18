@@ -189,10 +189,8 @@ class FakeSwitcher:
         self.calls.append(("add_token", token, email, slot, assume_yes))
         print(f"Added Account {slot or 9}")
 
-    def set_poll_policy_inputs(
-        self, threshold: float, models: tuple[str, ...]
-    ) -> None:
-        self._poll_inputs_override = (threshold, models)
+    def set_poll_policy_inputs(self, default, per_account=None) -> None:
+        self._poll_inputs_override = (default, dict(per_account or {}))
 
     def clear_poll_policy_inputs(self) -> None:
         self._poll_inputs_override = None

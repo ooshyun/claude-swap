@@ -4283,7 +4283,7 @@ class TestDeadTokenQuarantine:
 
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
-        switcher._poll_inputs_override = (90.0, ("Fable",))
+        switcher._poll_inputs_override = ((90.0, ("Fable",)), {})
         store = switcher._usage_store
         now = time.time()
 
@@ -12590,3 +12590,38 @@ class TestAutoswitchOverride:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(profile))
         with pytest.raises(SwitchError, match="session profile"):
             s.set_account_autoswitch_override("1", threshold="80")
+
+    def test_poll_policy_inputs_from_files_include_overrides(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_autoswitch_override("2", threshold="75", model="Opus")
+        default, per_account = s._poll_policy_inputs()
+        assert default == (90.0, ())
+        assert per_account == {"2": (75.0, ("Opus",))}
+
+    def test_plans_after_fetch_uses_account_threshold(self, temp_home, monkeypatch):
+        from claude_swap import poll_policy
+        from claude_swap.usage_store import FetchRecord
+
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_autoswitch_override("2", threshold="60")
+        seen: dict[str, float] = {}
+        real = poll_policy.plan_after_fetch
+
+        def spy(**kw):
+            seen[kw["is_active"]] = kw["threshold"]
+            return real(**kw)
+
+        monkeypatch.setattr(poll_policy, "plan_after_fetch", spy)
+        usage = {"five_hour": {"pct": 10.0}, "seven_day": {"pct": 10.0}}
+        records = {
+            "1": FetchRecord(usage=usage),
+            "2": FetchRecord(usage=usage),
+        }
+        info = {"1": (1, "a@example.com", "", "", True, "", ""),
+                "2": (2, "b@example.com", "", "", False, "", "")}
+        s._plans_after_fetch(records, pre={}, info_by_num=info)
+        assert seen == {True: 90.0, False: 60.0}
