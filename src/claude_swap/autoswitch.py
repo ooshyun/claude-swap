@@ -670,11 +670,16 @@ class AutoSwitchEngine:
         # pass everywhere usage windows are read — decisions, cadence, and
         # reset scheduling must all see the same axes.
         self._models = parse_model_names(settings.model)
-        # Per-account overrides of the threshold / model axes (Task 4 fills
-        # these from the roster; empty means every account uses the globals).
-        # Fixed at construction like ``_models`` — a change restarts the engine.
+        # Per-account overrides of the threshold / model axes; empty means
+        # every account uses the globals. Fixed at construction like
+        # ``_models`` — a change restarts the engine.
         self._override_threshold: dict[str, float] = {}
         self._override_models: dict[str, tuple[str, ...]] = {}
+        for num, override in switcher.account_autoswitch_overrides().items():
+            if "threshold" in override:
+                self._override_threshold[num] = float(override["threshold"])
+            if "model" in override:
+                self._override_models[num] = parse_model_names(override["model"])
         # Poll plans written by the collector must key on the same threshold/
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
@@ -702,7 +707,9 @@ class AutoSwitchEngine:
         # One-shot typo guard for ``autoswitch.model``: resolved (and possibly
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
-        self._model_check_done = not self._models
+        self._model_check_done = not (
+            self._models or any(self._override_models.values())
+        )
 
     # -- per-account axes ---------------------------------------------------
 

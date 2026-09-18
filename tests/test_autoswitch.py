@@ -119,7 +119,14 @@ class EngineHarness:
             **kwargs,
         )
 
-    def seed(self, num: int, email: str, *, expires_at: int | None = None) -> None:
+    def seed(
+        self,
+        num: int,
+        email: str,
+        *,
+        expires_at: int | None = None,
+        override: dict | None = None,
+    ) -> None:
         oauth_blob: dict = {
             "accessToken": f"sk-{num}",
             "refreshToken": f"rt-{num}",
@@ -137,13 +144,16 @@ class EngineHarness:
             }),
         )
         data = self.switcher._get_sequence_data()
-        data["accounts"][str(num)] = {
+        record = {
             "email": email,
             "uuid": f"uuid-{num}",
             "organizationUuid": "",
             "organizationName": "",
             "added": "2024-01-01T00:00:00Z",
         }
+        if override:
+            record["autoswitch"] = dict(override)
+        data["accounts"][str(num)] = record
         if num not in data["sequence"]:
             data["sequence"].append(num)
             data["sequence"].sort()
@@ -158,6 +168,10 @@ class EngineHarness:
         (self.temp_home / ".claude.json").write_text(json.dumps({
             "oauthAccount": {"emailAddress": email, "accountUuid": f"uuid-{num}"},
         }))
+
+    def rebuild_engine(self) -> None:
+        """Re-read the roster (overrides are fixed at engine construction)."""
+        self.engine = self._make_engine()
 
     def tick_with_usage(self, usage: dict) -> TickOutcome:
         entries = {
@@ -6902,4 +6916,87 @@ class TestFreshenRoutesThroughGate:
         assert verdict == "ok"
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
+
+
+class TestPerAccountOverrides:
+    """Each account is judged on its own threshold/model axes (spec §2.1)."""
+
+    def _fleet(self, temp_home, *, overrides: dict[int, dict], **settings) -> EngineHarness:
+        h = EngineHarness(temp_home, **settings)
+        h.seed(1, "a@example.com", override=overrides.get(1))
+        h.seed(2, "b@example.com", override=overrides.get(2))
+        h.seed(3, "c@example.com", override=overrides.get(3))
+        h.make_live("a@example.com", 1)
+        h.rebuild_engine()
+        return h
+
+    def test_trigger_uses_active_accounts_threshold(self, temp_home):
+        h = self._fleet(temp_home, overrides={1: {"threshold": 80}})
+        outcome = h.tick_with_usage({
+            "1": _usage(82), "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.SWITCHED  # 82 ≥ 80 (override), < 90 (global)
+
+    def test_global_threshold_still_applies_without_override(self, temp_home):
+        h = self._fleet(temp_home, overrides={})
+        outcome = h.tick_with_usage({
+            "1": _usage(82), "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+
+    def test_trigger_uses_active_accounts_model(self, temp_home):
+        h = self._fleet(temp_home, overrides={1: {"model": "Fable"}})
+        outcome = h.tick_with_usage({
+            "1": _model_usage(10.0, 100.0),  # 5h/7d healthy, Fable exhausted
+            "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.SWITCHED
+
+    def test_landing_uses_targets_threshold(self, temp_home):
+        h = self._fleet(temp_home, overrides={2: {"threshold": 70}})
+        outcome = h.tick_with_usage({
+            "1": _usage(95), "2": _usage(75), "3": _usage(85),
+        })
+        # Globally #2 (25 pts headroom) would rank first; at/over its OWN 70
+        # line it is not a landing spot, so #3 (15 pts, clears the 10-pt
+        # hysteresis against the active's 5) is chosen instead. #3 sits
+        # below the global 90, so the all-above "soonest reset" path is off.
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_candidate_headroom_uses_its_own_model_axes(self, temp_home):
+        h = self._fleet(temp_home, overrides={2: {"model": "Fable"}})
+        outcome = h.tick_with_usage({
+            "1": _usage(95),
+            "2": _model_usage(10.0, 100.0),  # Fable exhausted → 0 headroom for #2
+            "3": _usage(50),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_apply_threshold_skips_overridden_accounts(self, temp_home):
+        h = self._fleet(temp_home, overrides={1: {"threshold": 95}})
+        h.engine.apply_threshold(60.0)
+        outcome = h.tick_with_usage({
+            "1": _usage(80), "2": _usage(10), "3": _usage(10),
+        })
+        # session value 60 would fire, but #1's own 95 wins
+        assert outcome is TickOutcome.NO_ACTION
+
+    def test_corrupt_override_falls_back_to_global(self, temp_home):
+        h = self._fleet(temp_home, overrides={1: {"threshold": "high", "model": 7}})
+        outcome = h.tick_with_usage({
+            "1": _usage(92), "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.SWITCHED  # global 90 applied
+
+    def test_model_name_check_covers_override_models(self, temp_home):
+        h = self._fleet(temp_home, overrides={2: {"model": "Sonet"}})  # typo
+        h.tick_with_usage({
+            "1": _model_usage(10.0, 10.0),
+            "2": _model_usage(10.0, 10.0),
+            "3": _model_usage(10.0, 10.0),
+        })
+        warnings = [e for e in h.events if e.kind == "config-warning"]
+        assert warnings and "Sonet" in warnings[0].message
 
