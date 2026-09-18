@@ -12486,3 +12486,107 @@ class TestSessionShellGuardCoversEveryMutator:
         s = self._switcher(sample_sequence_data, monkeypatch)
         with pytest.raises(SwitchError):
             s.unset_alias("2")
+
+
+class TestAutoswitchOverride:
+    def _setup(self, temp_home: Path) -> ClaudeAccountSwitcher:
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.LINUX
+        s._setup_directories()
+        s._init_sequence_file()
+        return s
+
+    def _seed(self, s: ClaudeAccountSwitcher, num: int, email: str) -> None:
+        s._write_account_credentials(
+            str(num), email,
+            json.dumps({"claudeAiOauth": {
+                "accessToken": f"sk-{num}", "refreshToken": f"rt-{num}"}}),
+        )
+        s._write_account_config(
+            str(num), email,
+            json.dumps({"oauthAccount": {
+                "emailAddress": email, "accountUuid": f"uuid-{num}"}}),
+        )
+        data = s._get_sequence_data() or {
+            "activeAccountNumber": None, "lastUpdated": "",
+            "sequence": [], "accounts": {},
+        }
+        data["accounts"][str(num)] = {
+            "email": email, "uuid": f"uuid-{num}",
+            "organizationUuid": "", "organizationName": "",
+            "added": "2024-01-01T00:00:00Z",
+        }
+        if num not in data["sequence"]:
+            data["sequence"].append(num)
+            data["sequence"].sort()
+        if data["activeAccountNumber"] is None:
+            data["activeAccountNumber"] = num
+        s._write_json(s.sequence_file, data)
+
+    def test_set_threshold_persists_and_reads_back(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        out = s.set_account_autoswitch_override("2", threshold="80")
+        assert out == {"threshold": 80.0}
+        assert s.account_autoswitch_override("2") == {"threshold": 80.0}
+        assert s.account_autoswitch_override("1") == {}
+        raw = s._get_sequence_data()["accounts"]["2"]["autoswitch"]
+        assert raw == {"threshold": 80.0}
+
+    def test_set_model_by_email_and_alias(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_autoswitch_override("b@example.com", model="Fable")
+        assert s.account_autoswitch_override("2") == {"model": "Fable"}
+
+    def test_none_clears_key_and_empty_object_is_removed(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        s.set_account_autoswitch_override("1", threshold="70", model="Opus")
+        s.set_account_autoswitch_override("1", threshold=None)
+        assert s.account_autoswitch_override("1") == {"model": "Opus"}
+        s.set_account_autoswitch_override("1", model=None)
+        assert s.account_autoswitch_override("1") == {}
+        assert "autoswitch" not in s._get_sequence_data()["accounts"]["1"]
+
+    def test_invalid_value_raises_and_writes_nothing(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        with pytest.raises(ConfigError, match="between 50 and 99.9"):
+            s.set_account_autoswitch_override("1", threshold="120")
+        assert "autoswitch" not in s._get_sequence_data()["accounts"]["1"]
+
+    def test_unknown_account_raises(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        with pytest.raises(AccountNotFoundError):
+            s.set_account_autoswitch_override("9", threshold="80")
+
+    def test_overrides_map_covers_every_slot_in_sequence_order(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._seed(s, 3, "c@example.com")
+        s.set_account_autoswitch_override("3", model="all")
+        assert list(s.account_autoswitch_overrides().items()) == [
+            ("1", {}), ("2", {}), ("3", {"model": "all"}),
+        ]
+
+    def test_corrupt_stored_value_reads_as_empty(self, temp_home):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        data = s._get_sequence_data()
+        data["accounts"]["1"]["autoswitch"] = {"threshold": "high", "model": 5}
+        s._write_json(s.sequence_file, data)
+        assert s.account_autoswitch_override("1") == {}
+
+    def test_refused_inside_session_shell(self, temp_home, monkeypatch):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        profile = s.backup_dir / "sessions" / "1-a-example-com"
+        profile.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(profile))
+        with pytest.raises(SwitchError, match="session profile"):
+            s.set_account_autoswitch_override("1", threshold="80")

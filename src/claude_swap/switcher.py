@@ -85,7 +85,14 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
-from claude_swap.settings import load_settings, parse_model_names, settings_path
+from claude_swap.settings import (
+    SETTING_SPECS,
+    load_settings,
+    parse_model_names,
+    parse_setting_value,
+    settings_path,
+    validate_account_override,
+)
 from claude_swap.usage_store import (
     FetchRecord,
     UsageEntry,
@@ -104,6 +111,10 @@ KEYRING_SERVICE = "claude-code"
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
 SETUP_TOKEN_SCOPES = ("user:inference",)
+
+#: Sentinel for "argument not passed" in keyword-only override setters, so a
+#: caller can distinguish "leave this key alone" from "delete this key" (None).
+_UNSET = object()
 
 # Delay between successive usage-request launches in one collect pass, so N
 # accounts never burst the shared usage endpoint from one IP in the same
@@ -1913,6 +1924,90 @@ class ClaudeAccountSwitcher:
                 )
         else:
             print(dimmed("  It is back in the rotation."))
+
+    # -- per-account auto-switch overrides -------------------------------------
+
+    @staticmethod
+    def _autoswitch_override_from_data(data: dict, account_num: str) -> dict:
+        """Validated ``autoswitch`` override of a slot in already-loaded data."""
+        record = data.get("accounts", {}).get(str(account_num)) or {}
+        return validate_account_override(
+            record.get("autoswitch"), where=f"Account-{account_num}"
+        )
+
+    def account_autoswitch_override(self, account_num: str) -> dict:
+        """One slot's validated override: ``{"threshold": …}``/``{"model": …}``/both/``{}``."""
+        data = self._get_sequence_data() or {}
+        return self._autoswitch_override_from_data(data, str(account_num))
+
+    def account_autoswitch_overrides(self) -> dict[str, dict]:
+        """Every managed slot's override in sequence order (``{}`` when none)."""
+        data = self._get_sequence_data() or {}
+        return {
+            str(num): self._autoswitch_override_from_data(data, str(num))
+            for num in data.get("sequence", [])
+        }
+
+    def set_account_autoswitch_override(
+        self,
+        identifier: str,
+        *,
+        threshold: object = _UNSET,
+        model: object = _UNSET,
+    ) -> dict:
+        """Set or clear one account's ``autoswitch.threshold`` / ``.model``.
+
+        Pass a value to set it (validated with the same ``parse_setting_value``
+        rules as ``cswap config set``), ``None`` to delete that key, or omit
+        the argument to leave it alone. An override object left empty is
+        removed from the record. Returns the stored override.
+
+        Raises:
+            ConfigError: no accounts yet, ambiguous email, or invalid value.
+            AccountNotFoundError: identifier doesn't match any account.
+            SwitchError: called from inside a ``cswap run`` session shell.
+        """
+        self._refuse_session_shell()
+        if not self.sequence_file.exists():
+            raise ConfigError("No accounts are managed yet")
+        account_num, email, _ = self.resolve_account(identifier)
+
+        # Validate BEFORE touching the roster so a bad value writes nothing.
+        parsed: dict[str, object] = {}
+        if threshold is not _UNSET and threshold is not None:
+            parsed["threshold"] = parse_setting_value(
+                SETTING_SPECS["autoswitch.threshold"], str(threshold)
+            )
+        if model is not _UNSET and model is not None:
+            parsed["model"] = parse_setting_value(
+                SETTING_SPECS["autoswitch.model"], str(model)
+            )
+
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+        existing = record.get("autoswitch")
+        override: dict = dict(existing) if isinstance(existing, dict) else {}
+        if threshold is None:
+            override.pop("threshold", None)
+        if model is None:
+            override.pop("model", None)
+        override.update(parsed)
+
+        if override:
+            record["autoswitch"] = override
+        else:
+            record.pop("autoswitch", None)
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+        # Poll planning keys on these values; drop the settings-file cache so
+        # the next pass re-reads (see _poll_policy_inputs).
+        self._poll_inputs_cache = None
+        self._logger.info(
+            f"Autoswitch override for account {account_num} ({email}): {override or 'cleared'}"
+        )
+        return override
 
     def account_kind_for(self, account_num: str) -> str:
         """Public wrapper: ``"api_key"`` or ``"oauth"`` (setup-tokens read as oauth)."""
