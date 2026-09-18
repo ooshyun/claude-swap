@@ -268,3 +268,87 @@ class TestConfigMisc:
             with pytest.raises(SystemExit):
                 cli.main()
         assert captured["settings"].threshold == 77.0
+
+
+def _seed_two_accounts(temp_home):
+    from claude_swap.models import Platform
+    from claude_swap.switcher import ClaudeAccountSwitcher
+
+    s = ClaudeAccountSwitcher()
+    s.platform = Platform.LINUX
+    s._setup_directories()
+    s._init_sequence_file()
+    for num, email in ((1, "a@example.com"), (2, "b@example.com")):
+        s._write_account_credentials(
+            str(num), email,
+            json.dumps({"claudeAiOauth": {"accessToken": f"sk-{num}", "refreshToken": f"rt-{num}"}}),
+        )
+        s._write_account_config(
+            str(num), email,
+            json.dumps({"oauthAccount": {"emailAddress": email, "accountUuid": f"uuid-{num}"}}),
+        )
+        data = s._get_sequence_data()
+        data["accounts"][str(num)] = {
+            "email": email, "uuid": f"uuid-{num}", "organizationUuid": "",
+            "organizationName": "", "added": "2024-01-01T00:00:00Z",
+        }
+        if num not in data["sequence"]:
+            data["sequence"].append(num)
+        if data["activeAccountNumber"] is None:
+            data["activeAccountNumber"] = num
+        s._write_json(s.sequence_file, data)
+    return s
+
+
+class TestConfigAccount:
+    def test_set_and_get_account_threshold(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        code, out, _ = _run(["set", "--account", "2", "autoswitch.threshold", "75"], capsys)
+        assert code == 0
+        assert "autoswitch.threshold = 75" in out
+        code, out, _ = _run(["get", "--account", "2", "autoswitch.threshold"], capsys)
+        assert code == 0 and out.strip() == "75"
+        code, out, _ = _run(["get", "--account", "1", "autoswitch.threshold"], capsys)
+        assert code == 0 and out.strip() == "90  (global)"
+
+    def test_get_json_reports_source(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        _run(["set", "--account", "b@example.com", "autoswitch.model", "Fable"], capsys)
+        code, out, _ = _run(["get", "--account", "2", "autoswitch.model", "--json"], capsys)
+        assert code == 0
+        payload = json.loads(out)
+        assert payload == {
+            "schemaVersion": 1, "key": "autoswitch.model", "account": 2,
+            "value": "Fable", "source": "account",
+        }
+        code, out, _ = _run(["get", "--account", "1", "autoswitch.model", "--json"], capsys)
+        assert json.loads(out)["source"] == "global"
+
+    def test_unset_account_key(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        _run(["set", "--account", "2", "autoswitch.threshold", "75"], capsys)
+        code, out, _ = _run(["unset", "--account", "2", "autoswitch.threshold"], capsys)
+        assert code == 0 and "unset" in out
+        code, out, _ = _run(["get", "--account", "2", "autoswitch.threshold"], capsys)
+        assert out.strip() == "90  (global)"
+
+    def test_list_account_shows_only_two_keys(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        _run(["set", "--account", "2", "autoswitch.threshold", "75"], capsys)
+        code, out, _ = _run(["list", "--account", "2"], capsys)
+        assert code == 0
+        assert "autoswitch.threshold" in out and "autoswitch.model" in out
+        assert "autoswitch.strategy" not in out
+        assert out.count("(global)") == 1
+
+    def test_account_flag_rejected_for_other_keys(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        code, _, err = _run(["set", "--account", "2", "autoswitch.strategy", "best"], capsys)
+        assert code == 1
+        assert "no per-account value" in err
+
+    def test_unknown_account_errors(self, temp_home, capsys):
+        _seed_two_accounts(temp_home)
+        code, _, err = _run(["set", "--account", "9", "autoswitch.threshold", "75"], capsys)
+        assert code == 1
+        assert "Account-9 does not exist" in err

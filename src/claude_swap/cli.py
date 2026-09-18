@@ -754,10 +754,14 @@ def _config_command(argv: list[str]) -> None:
     which forgivingly clamps — so a typo'd key or out-of-range value errors
     loudly here instead of silently degrading at `cswap auto` time.
     """
+    from claude_swap.exceptions import ConfigError
     from claude_swap.settings import (
+        ACCOUNT_OVERRIDE_KEYS,
         SETTING_SPECS,
         effective_settings,
         format_setting_value,
+        load_settings,
+        resolve_account_policy,
         set_setting,
         setting_spec,
         settings_path,
@@ -785,6 +789,8 @@ Examples:
   cswap config set autoswitch.threshold 80
   cswap config unset autoswitch.threshold   # back to the default
   cswap config path                         # where settings.json lives
+  cswap config set --account 2 autoswitch.threshold 80   # this account only
+  cswap config unset --account 2 autoswitch.threshold    # back to the global value
         """,
     )
     parser.add_argument(
@@ -818,6 +824,17 @@ Examples:
     p_unset.add_argument("key", metavar="KEY")
     sub.add_parser("path", help="Print the settings.json location")
 
+    for p in (p_list, p_get, p_set, p_unset):
+        p.add_argument(
+            "--account",
+            metavar="NUM|EMAIL|ALIAS",
+            default=None,
+            help=(
+                "Read or write this account's own value for autoswitch.threshold "
+                "/ autoswitch.model (overrides the global setting for that account)"
+            ),
+        )
+
     args = parser.parse_args(argv)
     json_mode = bool(getattr(args, "json", False))
     action = args.action or "list"
@@ -831,6 +848,76 @@ Examples:
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
         root = switcher.backup_dir
+
+        account = getattr(args, "account", None)
+        if account is not None:
+            if action == "path":
+                parser.error("--account cannot be used with path")
+            account_num, _email, _ = switcher.resolve_account(account)
+            override = switcher.account_autoswitch_override(account_num)
+            policy = resolve_account_policy(load_settings(root), override)
+
+            def _row(spec):
+                field = "threshold" if spec.json_key == "threshold" else "model"
+                is_set = field in override
+                if field == "threshold":
+                    value = policy.threshold
+                else:
+                    value = override.get("model") if is_set else load_settings(root).model
+                return spec, value, is_set
+
+            def _check_key(key: str):
+                spec = setting_spec(key)
+                if spec.dotted not in ACCOUNT_OVERRIDE_KEYS:
+                    raise ConfigError(
+                        f"{spec.dotted} has no per-account value; only "
+                        f"{', '.join(ACCOUNT_OVERRIDE_KEYS)} can be set with --account"
+                    )
+                return spec
+
+            if action == "list":
+                rows = [_row(setting_spec(k)) for k in ACCOUNT_OVERRIDE_KEYS]
+                if json_mode:
+                    print(json.dumps({
+                        "schemaVersion": 1,
+                        "account": int(account_num),
+                        "settings": [
+                            {"key": spec.dotted, "value": value,
+                             "source": "account" if is_set else "global"}
+                            for spec, value, is_set in rows
+                        ],
+                    }, indent=2))
+                else:
+                    for spec, value, is_set in rows:
+                        line = f"{spec.dotted:<22}  {format_setting_value(value)}"
+                        print(line if is_set else f"{line}  {dimmed('(global)')}")
+            elif action == "get":
+                spec, value, is_set = _row(_check_key(args.key))
+                if json_mode:
+                    print(json.dumps({
+                        "schemaVersion": 1, "key": spec.dotted,
+                        "account": int(account_num), "value": value,
+                        "source": "account" if is_set else "global",
+                    }, indent=2))
+                else:
+                    shown = format_setting_value(value)
+                    print(shown if is_set else f"{shown}  {dimmed('(global)')}")
+            elif action == "set":
+                spec = _check_key(args.key)
+                kw = {("threshold" if spec.json_key == "threshold" else "model"): args.value}
+                stored = switcher.set_account_autoswitch_override(account_num, **kw)
+                field = "threshold" if spec.json_key == "threshold" else "model"
+                print(f"{spec.dotted} = {format_setting_value(stored[field])}  (account {account_num})")
+            elif action == "unset":
+                spec = _check_key(args.key)
+                field = "threshold" if spec.json_key == "threshold" else "model"
+                if field in override:
+                    switcher.set_account_autoswitch_override(account_num, **{field: None})
+                    print(f"{spec.dotted} unset for account {account_num} (back to the global value)")
+                else:
+                    print(muted(f"{spec.dotted} is not set for account {account_num}; nothing to do"),
+                          file=sys.stderr)
+            return
 
         if action == "path":
             print(settings_path(root))
