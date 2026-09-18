@@ -14,13 +14,14 @@ snapshot poller runs store-only: the engine is the only fetcher.
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, RichLog, Static
 
@@ -31,12 +32,17 @@ from claude_swap.autoswitch import (
     pct_label,
 )
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
+from claude_swap.settings import (
+    SETTING_SPECS,
+    load_settings,
+    parse_model_names,
+    resolve_account_policy,
+)
 from claude_swap.tui import data
 from claude_swap.tui.config_screen import ConfigScreen
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
-from claude_swap.tui.widgets import AccountsPanel
+from claude_swap.tui.widgets import AccountsPanel, account_card_text
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -72,6 +78,7 @@ class AutoScreen(Screen):
         Binding("enter", "adjust_done", "Done"),
         Binding("escape,q", "back", "Back"),
         Binding("c", "open_config", "Config"),
+        Binding("e", "toggle_expand", "Expand / collapse"),
     ]
 
     app: "CswapApp"
@@ -92,6 +99,9 @@ class AutoScreen(Screen):
         # summary line so a session threshold adjustment (which only steers
         # the global slot) can flag that it doesn't reach every account.
         self._override_count = 0
+        # "Next best" candidates: one line each (default) or full cards.
+        # Session-only, same precedent as the threshold adjust toggle.
+        self._expanded = False
 
     def compose(self) -> ComposeResult:
         yield AccountsPanel(show_minis=False, id="auto-active-panel")
@@ -99,7 +109,8 @@ class AutoScreen(Screen):
             with Horizontal(id="auto-title-row"):
                 yield Static(" DRY-RUN ", id="mode-badge", classes="dry")
                 yield Static("", id="auto-summary")
-            yield Static("", id="candidates")
+            with VerticalScroll(id="candidates-scroll"):
+                yield Static("", id="candidates")
         yield RichLog(id="event-log", highlight=False, markup=False, wrap=True)
         yield Footer()
 
@@ -144,6 +155,12 @@ class AutoScreen(Screen):
             self._end_adjust()
             return
         self.app.pop_screen()
+
+    def action_toggle_expand(self) -> None:
+        self._expanded = not self._expanded
+        snap = self.app.snapshot
+        if snap is not None:
+            self._on_snapshot(snap)
 
     # -- config screen --------------------------------------------------------
 
@@ -332,9 +349,12 @@ class AutoScreen(Screen):
     def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is None:
             return
-        self.query_one("#candidates", Static).update(
-            self._candidates_text(snap, active_number=snap.active_number)
+        text = (
+            self._candidates_expanded_text(snap, active_number=snap.active_number)
+            if self._expanded
+            else self._candidates_text(snap, active_number=snap.active_number)
         )
+        self.query_one("#candidates", Static).update(text)
 
     def _candidates_text(
         self, snap: AccountsSnapshot, active_number: str | None
@@ -367,10 +387,54 @@ class AutoScreen(Screen):
             lines[acc.number] = entry
 
         text = Text()
-        text.append("Next best", style=palette.muted)
+        text.append("Next best ▸", style=palette.muted)
         if not ranked:
             text.append("\n  no other switchable accounts", style=palette.muted)
             return text
         for _pct, number in sorted(ranked):
             text.append(lines[number])
+        return text
+
+    def _ranked_candidates(
+        self, snap: AccountsSnapshot, active_number: str | None
+    ) -> list:
+        """Same ordering as the collapsed list: pct used ascending, sentinels
+        and unknowns last, sequence order breaking ties."""
+        models = parse_model_names(self._settings.model) if self._settings else ()
+        ranked = []
+        for acc in snap.accounts:
+            if acc.number == active_number or not acc.switchable:
+                continue
+            if acc.usage.sentinel is not None:
+                key = 998.0
+            else:
+                pct = binding_pct(acc.usage.last_good, models)
+                key = 999.0 if pct is None else pct
+            ranked.append((key, acc))
+        ranked.sort(key=lambda t: t[0])
+        return [acc for _, acc in ranked]
+
+    def _candidates_expanded_text(
+        self, snap: AccountsSnapshot, active_number: str | None
+    ) -> Text:
+        """Every switch target as a full card (same renderer as the active
+        card), each with ITS OWN threshold tick."""
+        palette = Palette.from_theme(self.app.current_theme)
+        overrides = self.app.switcher.account_autoswitch_overrides()
+        width = (self.query_one("#candidates", Static).size.width or 80) - 2
+        now = time.time()
+        text = Text()
+        text.append("Next best ▾", style=palette.muted)
+        cards = self._ranked_candidates(snap, active_number)
+        if not cards:
+            text.append("\n  no other switchable accounts", style=palette.muted)
+            return text
+        for acc in cards:
+            policy = resolve_account_policy(self._settings, overrides.get(acc.number, {}))
+            text.append("\n\n")
+            text.append(
+                account_card_text(
+                    acc, width, threshold=policy.threshold, now=now, palette=palette
+                )
+            )
         return text

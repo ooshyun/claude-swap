@@ -1615,6 +1615,46 @@ class TestAutoScreen:
             summary = app.screen.query_one("#auto-summary", Static).render().plain
             assert "(session · global only)" in summary
 
+    async def test_e_expands_candidates_to_full_cards_and_back(self, tmp_path, fake_engine):
+        from textual.widgets import Static
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 48)) as pilot:
+            await self._open(pilot)
+            before = app.screen.query_one("#candidates", Static).render().plain
+            assert "Next best ▸" in before
+            assert before.count("\n") <= 3          # one line per candidate
+            await pilot.press("e"); await pilot.pause()
+            after = app.screen.query_one("#candidates", Static).render().plain
+            assert "Next best ▾" in after
+            assert "5h" in after and "7d" in after   # bar rows from account_card_text
+            assert after.count("\n") > before.count("\n")
+            await pilot.press("e"); await pilot.pause()
+            again = app.screen.query_one("#candidates", Static).render().plain
+            assert again == before                    # collapsed text is unchanged
+
+    async def test_expanded_card_uses_account_threshold(self, tmp_path, fake_engine, monkeypatch):
+        seen: list[float | None] = []
+        from claude_swap.tui import autoview
+
+        real = autoview.account_card_text
+
+        def spy(acc, width, **kw):
+            seen.append((acc.number, kw.get("threshold")))
+            return real(acc, width, **kw)
+
+        monkeypatch.setattr(autoview, "account_card_text", spy)
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        fake.overrides["2"] = {"threshold": 70.0}
+        app = make_app(fake)
+        async with app.run_test(size=(100, 48)) as pilot:
+            await self._open(pilot)
+            await pilot.press("e"); await pilot.pause()
+            assert ("2", 70.0) in seen
+
 
 class TestEventText:
     def test_switch_event_styling_and_content(self):

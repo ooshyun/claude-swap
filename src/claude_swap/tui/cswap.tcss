@@ -110,6 +110,12 @@ MenuItem Static.menu-item-muted { color: $secondary; }
     padding-left: 2;
 }
 
+#candidates-scroll {
+    height: auto;
+    max-height: 60%;
+    scrollbar-size-vertical: 1;
+}
+
 #candidates {
     height: auto;
 }
@@ -119,6 +125,7 @@ MenuItem Static.menu-item-muted { color: $secondary; }
     border-top: solid $panel;
     padding: 0 1;
     scrollbar-size-vertical: 1;
+    min-height: 6;
 }
 
 /* -- modals ----------------------------------------------------------------- */
