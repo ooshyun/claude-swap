@@ -1556,6 +1556,65 @@ class TestAutoScreen:
                 "user2@example.com"
             )
 
+    async def test_c_opens_config_and_dirty_return_restarts_engine_keeping_mode(
+        self, tmp_path, fake_engine
+    ):
+        from textual.widgets import Input, ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            await pilot.press("l"); await pilot.pause()
+            await pilot.press("y"); await settle(pilot)
+            assert fake_engine.instances[-1].dry_run is False
+            await pilot.press("c"); await pilot.pause()
+            from claude_swap.tui.config_screen import ConfigScreen
+
+            assert isinstance(app.screen, ConfigScreen)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("t"); await pilot.pause()
+            app.screen.query_one("#value", Input).value = "75"
+            await pilot.press("enter"); await pilot.pause()
+            await pilot.press("escape"); await settle(pilot)
+            from claude_swap.tui.autoview import AutoScreen
+
+            assert isinstance(app.screen, AutoScreen)
+            assert fake_engine.instances[-2].stopped is True
+            assert fake_engine.instances[-1].dry_run is False   # live preserved
+            from textual.widgets import RichLog, Static
+
+            log = app.screen.query_one("#event-log", RichLog)
+            assert any("config changed" in line.text for line in log.lines)
+            summary = app.screen.query_one("#auto-summary", Static).render().plain
+            assert "(+1 per-account)" in summary
+
+    async def test_clean_return_from_config_does_not_restart(self, tmp_path, fake_engine):
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            n = len(fake_engine.instances)
+            await pilot.press("c"); await pilot.pause()
+            await pilot.press("escape"); await settle(pilot)
+            assert len(fake_engine.instances) == n
+            assert fake_engine.instances[-1].stopped is False
+
+    async def test_session_adjust_summary_notes_global_only_with_overrides(
+        self, tmp_path, fake_engine
+    ):
+        from textual.widgets import Static
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        fake.overrides["2"] = {"threshold": 80.0}
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            await pilot.press("t", "right"); await pilot.pause()
+            summary = app.screen.query_one("#auto-summary", Static).render().plain
+            assert "(session · global only)" in summary
+
 
 class TestEventText:
     def test_switch_event_styling_and_content(self):

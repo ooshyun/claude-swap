@@ -33,6 +33,7 @@ from claude_swap.autoswitch import (
 from claude_swap.models import AccountsSnapshot
 from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
 from claude_swap.tui import data
+from claude_swap.tui.config_screen import ConfigScreen
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
 from claude_swap.tui.widgets import AccountsPanel
@@ -70,6 +71,7 @@ class AutoScreen(Screen):
         Binding("right", "threshold_step(1)", "+1%"),
         Binding("enter", "adjust_done", "Done"),
         Binding("escape,q", "back", "Back"),
+        Binding("c", "open_config", "Config"),
     ]
 
     app: "CswapApp"
@@ -86,6 +88,10 @@ class AutoScreen(Screen):
         self._adjusting = False
         self._configured_threshold: float | None = None
         self._entry_threshold: float | None = None
+        # Count of accounts carrying an autoswitch override, shown in the
+        # summary line so a session threshold adjustment (which only steers
+        # the global slot) can flag that it doesn't reach every account.
+        self._override_count = 0
 
     def compose(self) -> ComposeResult:
         yield AccountsPanel(show_minis=False, id="auto-active-panel")
@@ -108,6 +114,9 @@ class AutoScreen(Screen):
         # adjustment reverts, not this correction).
         self._configured_threshold = self._settings.threshold
         self.app.threshold_pct = self._settings.threshold
+        self._override_count = sum(
+            1 for ov in self.app.switcher.account_autoswitch_overrides().values() if ov
+        )
         self._update_summary()
         self.watch(self.app, "snapshot", self._on_snapshot)
         self.watch(self.app, "theme", self._on_theme_change)
@@ -135,6 +144,39 @@ class AutoScreen(Screen):
             self._end_adjust()
             return
         self.app.pop_screen()
+
+    # -- config screen --------------------------------------------------------
+
+    def action_open_config(self) -> None:
+        if self._adjusting:
+            self._end_adjust()
+        self.app.push_screen(ConfigScreen(), self._on_config_closed)
+
+    def _on_config_closed(self, dirty: bool | None) -> None:
+        if not dirty:
+            return
+        # Saved values replace any session adjustment: re-read the file,
+        # re-sync the bar tick, and rebuild the engine (model/override axes
+        # are fixed at construction) in the SAME live/dry-run mode.
+        self._settings = load_settings(self.app.switcher.backup_dir)
+        self._configured_threshold = self._settings.threshold
+        self.app.threshold_pct = self._settings.threshold
+        self._override_count = sum(
+            1 for ov in self.app.switcher.account_autoswitch_overrides().values() if ov
+        )
+        dry_run = self._engine.dry_run if self._engine is not None else True
+        self._restart_engine(dry_run=dry_run)
+        self._update_summary()
+        self.query_one("#auto-active-panel", AccountsPanel).refresh()
+        snap = self.app.snapshot
+        if snap is not None:
+            self._on_snapshot(snap)
+        self.query_one("#event-log", RichLog).write(
+            Text(
+                "— config changed, engine restarted —",
+                style=Palette.from_theme(self.app.current_theme).muted,
+            )
+        )
 
     # -- threshold adjust mode ------------------------------------------------
 
@@ -198,7 +240,10 @@ class AutoScreen(Screen):
             style=palette.accent if self._adjusting else "",
         )
         if self._settings.threshold != self._configured_threshold:
-            text.append(" (session)", style=palette.muted)
+            note = "(session · global only)" if self._override_count else "(session)"
+            text.append(f" {note}", style=palette.muted)
+        if self._override_count:
+            text.append(f" (+{self._override_count} per-account)", style=palette.muted)
         text.append(f" · poll every {self._settings.interval_seconds:.0f}s")
         if self._adjusting:
             text.append("   ← → adjust · enter done", style=palette.muted)
