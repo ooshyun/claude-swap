@@ -2207,6 +2207,67 @@ class TestConfigScreen:
             assert "(global)" in plain[1]
             assert "80" in plain[2] and "(global)" in plain[2]  # model still inherits
 
+    async def test_auto_target_column_shows_on_off_per_account(self, tmp_path):
+        from textual.widgets import Static
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2, disabled=True)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self._open(app, pilot)
+            plain = [r.render_label().plain for r in self._rows(app)]
+            # header names the column; global has no per-account target state
+            header = app.screen.query_one("#config-header", Static).render().plain
+            assert "auto-target" in header
+            assert plain[0].rstrip().endswith("—")
+            assert plain[1].rstrip().endswith("on")    # eligible
+            assert plain[2].rstrip().endswith("off")   # held out of auto-switch
+
+    async def test_o_toggles_auto_target_for_the_selected_account(self, tmp_path):
+        from textual.widgets import ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self._open(app, pilot)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("o")
+            await settle(pilot)
+            assert ("set_disabled", "2", True) in fake.calls
+            assert self._rows(app)[2].render_label().plain.rstrip().endswith("off")
+            await pilot.press("o")  # and back
+            await settle(pilot)
+            assert ("set_disabled", "2", False) in fake.calls
+            assert self._rows(app)[2].render_label().plain.rstrip().endswith("on")
+
+    async def test_o_on_the_global_row_does_nothing(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self._open(app, pilot)  # cursor starts on the global row
+            await pilot.press("o")
+            await settle(pilot)
+            assert fake.calls == []
+
+    async def test_auto_target_toggle_needs_no_engine_restart(self, tmp_path):
+        """The engine re-reads its candidate list every tick, so a target
+        change lands on the next poll — no restart, hence not 'dirty'."""
+        from textual.widgets import ListView
+
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 32)) as pilot:
+            results = await self._open(app, pilot)
+            app.screen.query_one("#config-list", ListView).index = 2
+            await pilot.pause()
+            await pilot.press("o")
+            await settle(pilot)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [False]
+
     async def test_t_on_account_row_saves_override_and_marks_dirty(self, tmp_path):
         from textual.widgets import Input, ListView
 

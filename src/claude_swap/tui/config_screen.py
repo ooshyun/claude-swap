@@ -1,4 +1,4 @@
-"""Config screen: global + per-account autoswitch threshold/model in one table.
+"""Config screen: global + per-account autoswitch policy in one table.
 
 Reached from the auto screen with ``c``. Row 0 edits settings.json (the
 globals, via ``set_setting``/``unset_setting``); every other row edits that
@@ -6,6 +6,12 @@ account's roster override (``set_account_autoswitch_override``). Both paths
 validate with ``parse_setting_value`` inside :class:`SettingInputModal`, so
 the TUI can never store what ``cswap config`` would reject. Dismisses with
 ``True`` when anything was saved — the auto screen restarts its engine on it.
+
+The third column, ``auto-target``, is the ``cswap disable`` flag under the
+name that describes what it does here: ``off`` keeps the account out of
+auto-switch's candidate list. It is NOT an override and needs no restart —
+the engine rebuilds that list every tick — so toggling it leaves the screen
+clean.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ class ConfigScreen(Screen[bool]):
     BINDINGS = [
         Binding("t", "edit('threshold')", "Threshold"),
         Binding("m", "edit('model')", "Model"),
+        Binding("o", "toggle_target", "Auto-target on/off"),
         Binding("r", "reset", "Reset to global"),
         Binding("escape,q", "back", "Back"),
     ]
@@ -95,7 +102,10 @@ class ConfigScreen(Screen[bool]):
         accounts = list(snap.accounts) if snap else []
 
         header = Text()
-        header.append(f"{'':<26}{'threshold':<18}{'model'}", style=palette.muted)
+        header.append(
+            f"{'':<26}{'threshold':<18}{'model':<18}{'auto-target'}",
+            style=palette.muted,
+        )
         self.query_one("#config-header", Static).update(header)
 
         rows: list[ConfigRow] = []
@@ -104,7 +114,9 @@ class ConfigScreen(Screen[bool]):
         g.append(f"{format_setting_value(settings.threshold):<6}")
         g.append(f"{'' if self._global_is_set('threshold') else '(default)':<12}", style=palette.muted)
         g.append(f"{format_setting_value(settings.model):<8}")
-        g.append("" if self._global_is_set("model") else "(default)", style=palette.muted)
+        g.append(f"{'' if self._global_is_set('model') else '(default)':<10}", style=palette.muted)
+        # auto-target is a per-account state; there is nothing global to show.
+        g.append("—", style=palette.muted)
         rows.append(ConfigRow(_GLOBAL, g))
 
         for acc in accounts:
@@ -117,7 +129,14 @@ class ConfigScreen(Screen[bool]):
             t.append(f"{'' if 'threshold' in ov else '(global)':<12}", style=palette.muted)
             model_shown = ov.get("model", settings.model)
             t.append(f"{format_setting_value(model_shown):<8}")
-            t.append("" if "model" in ov else "(global)", style=palette.muted)
+            t.append(f"{'' if 'model' in ov else '(global)':<10}", style=palette.muted)
+            # "off" = held out of auto-switch's candidate list (cswap disable).
+            # Explicit switches — the TUI's own Switch screen included — still
+            # go there; only automatic target selection skips it.
+            if acc.disabled:
+                t.append("off", style=palette.sev_warn)
+            else:
+                t.append("on", style=palette.muted)
             rows.append(ConfigRow(acc.number, t))
 
         lv = self.query_one("#config-list", ListView)
@@ -178,6 +197,20 @@ class ConfigScreen(Screen[bool]):
         shown = "cleared" if edit.value is None else edit.value
         self.app.notify(f"{scope} · {field}: {shown}")
         self.call_later(self._rebuild)
+
+    def action_toggle_target(self) -> None:
+        """Hold the selected account out of auto-switch, or put it back.
+
+        This is the ``cswap disable`` flag under its auto-switch name: the
+        engine builds its candidate list from ``switchable_account_numbers``,
+        which skips it. Explicit switches are unaffected. Not ``_dirty``:
+        the engine re-reads that list every tick, so the change lands on the
+        next poll without a restart.
+        """
+        row = self._selected()
+        if row is None or row.scope == _GLOBAL:
+            return
+        self.app.do_toggle_disabled(row.scope)
 
     def action_reset(self) -> None:
         row = self._selected()
