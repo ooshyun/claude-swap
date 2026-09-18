@@ -355,3 +355,45 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestAccountOverride:
+    def test_validate_keeps_valid_threshold_and_model(self):
+        from claude_swap.settings import validate_account_override
+
+        assert validate_account_override({"threshold": 80, "model": "Fable"}) == {
+            "threshold": 80.0,
+            "model": "Fable",
+        }
+
+    def test_validate_drops_out_of_range_threshold(self, caplog):
+        from claude_swap.settings import validate_account_override
+
+        with caplog.at_level("WARNING", logger="claude-swap"):
+            out = validate_account_override({"threshold": 120}, where="Account-2")
+        assert out == {}
+        assert "Account-2" in caplog.text
+
+    def test_validate_drops_bool_and_non_string_model(self):
+        from claude_swap.settings import validate_account_override
+
+        assert validate_account_override({"threshold": True, "model": 3}) == {}
+        assert validate_account_override({"model": "  "}) == {}
+
+    def test_validate_non_dict_is_empty(self):
+        from claude_swap.settings import validate_account_override
+
+        assert validate_account_override(None) == {}
+        assert validate_account_override("x") == {}
+
+    def test_resolve_inherits_missing_keys(self):
+        from claude_swap.settings import AutoSwitchSettings, resolve_account_policy
+
+        s = AutoSwitchSettings(threshold=90.0, model="all")
+        p = resolve_account_policy(s, {"threshold": 75.0})
+        assert p.threshold == 75.0
+        assert p.models == ("all",)
+        p2 = resolve_account_policy(s, {"model": "Fable,Opus"})
+        assert p2.threshold == 90.0
+        assert p2.models == ("Fable", "Opus")
+        assert resolve_account_policy(s, {}).threshold == 90.0

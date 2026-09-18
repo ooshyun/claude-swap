@@ -486,3 +486,64 @@ def atomic_write_json(path: Path, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+# -- per-account overrides (sequence.json account record "autoswitch") -------
+
+#: The only settings that may carry a per-account value. Every other
+#: autoswitch key is an engine-mechanics knob with no per-account meaning.
+ACCOUNT_OVERRIDE_KEYS: tuple[str, str] = ("autoswitch.threshold", "autoswitch.model")
+
+
+def validate_account_override(raw: object, *, where: str = "") -> dict:
+    """Lenient read of one account's ``autoswitch`` override object.
+
+    Mirrors ``_clamped``'s posture for settings.json: a hand-edited or
+    corrupt value must never stop the engine, so anything outside the spec
+    is dropped (with a warning) and the account falls back to the global
+    value for that key. Strict validation belongs to the write path
+    (``parse_setting_value``), not here.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    label = f"{where}: " if where else ""
+
+    threshold = raw.get("threshold")
+    spec = SETTING_SPECS["autoswitch.threshold"]
+    if (
+        isinstance(threshold, (int, float))
+        and not isinstance(threshold, bool)
+        and spec.lo <= threshold <= spec.hi
+    ):
+        out["threshold"] = float(threshold)
+    elif threshold is not None:
+        _logger.warning(
+            "%sautoswitch override threshold %r is invalid; using the global value",
+            label, threshold,
+        )
+
+    model = raw.get("model")
+    if isinstance(model, str) and model.strip():
+        out["model"] = model.strip()
+    elif model is not None:
+        _logger.warning(
+            "%sautoswitch override model %r is invalid; using the global value",
+            label, model,
+        )
+    return out
+
+
+@dataclass(frozen=True)
+class AccountPolicy:
+    """The threshold/model axes one account is judged on (override-resolved)."""
+
+    threshold: float
+    models: tuple[str, ...]
+
+
+def resolve_account_policy(settings: AutoSwitchSettings, override: dict) -> AccountPolicy:
+    """Overlay a validated override on the global settings for one account."""
+    threshold = override.get("threshold", settings.threshold)
+    model = override.get("model", settings.model)
+    return AccountPolicy(float(threshold), parse_model_names(model))
