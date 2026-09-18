@@ -200,6 +200,28 @@ class FakeSwitcher:
     def clear_poll_policy_inputs(self) -> None:
         self._poll_inputs_override = None
 
+    @property
+    def order(self) -> list[str]:
+        """Who sits in each slot now, ascending by slot — the thing a reorder
+        actually changes (slot NUMBERS themselves never move)."""
+        return [a.email for a in sorted(self._accounts, key=lambda a: int(a.number))]
+
+    def move_account(self, account: str, target: str) -> tuple[str, str, bool]:
+        """Swap the account into `target`'s slot, displacing its occupant.
+
+        Mirrors the real switcher: slot NUMBERS stay put, the accounts
+        sitting in them trade places, and the list stays in slot order.
+        """
+        self.calls.append(("move", str(account), str(target)))
+        nums = [a.number for a in self._accounts]
+        i, j = nums.index(str(account)), nums.index(str(target))
+        accs = list(self._accounts)
+        # the two accounts trade slot numbers, then the list re-sorts by slot
+        accs[i] = dataclasses.replace(accs[i], number=str(target))
+        accs[j] = dataclasses.replace(accs[j], number=str(account))
+        self._accounts = sorted(accs, key=lambda a: int(a.number))
+        return (str(account), str(target), True)
+
     def account_autoswitch_overrides(self) -> dict[str, dict]:
         return {a.number: dict(self.overrides.get(a.number, {})) for a in self._accounts}
 
@@ -1301,6 +1323,257 @@ class TestWatchScreen:
             app._update_refresh_status()
             await pilot.pause()
             assert "refreshing" in title.render().plain
+
+    async def test_r_arms_reorder_mode_with_cursor_on_active(self, tmp_path):
+        from textual.widgets import ListView, Static
+
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            assert app.screen.query_one("#accounts", ListView).index is None
+            await pilot.press("r")
+            await pilot.pause()
+            assert app.screen._draft == ["1", "2"]
+            assert app.screen.query_one("#accounts", ListView).index == 0
+            assert "reorder" in app.screen.query_one("#list-title", Static).render().plain
+
+    async def test_shift_down_moves_the_draft_only_never_the_disk(self, tmp_path):
+        from textual.widgets import ListView
+
+        from claude_swap.tui.widgets import AccountItem
+
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("shift+down")
+            await pilot.pause()
+            assert app.screen._draft == ["2", "1"]
+            # the rendered rows follow the draft, and the cursor rides along
+            listview = app.screen.query_one("#accounts", ListView)
+            assert [i.number for i in listview.query(AccountItem)] == ["2", "1"]
+            assert listview.index == 1
+            # nothing was persisted — no switcher call at all
+            assert fake.calls == []
+
+    async def test_polling_updates_usage_without_undoing_the_draft(self, tmp_path):
+        from textual.widgets import ListView
+
+        from claude_swap.tui.widgets import AccountItem
+
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(10.0, 5.0)),
+                make_account(2, entry=make_entry(20.0, 5.0)),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("shift+down")
+            await pilot.pause()
+            assert app.screen._draft == ["2", "1"]
+            # a fresh poll lands with account 1's usage advanced
+            fake._accounts = [
+                make_account(1, active=True, entry=make_entry(44.0, 5.0)),
+                make_account(2, entry=make_entry(20.0, 5.0)),
+            ]
+            app.request_refresh()
+            await settle(pilot)
+            listview = app.screen.query_one("#accounts", ListView)
+            # draft order survives the repaint...
+            assert [i.number for i in listview.query(AccountItem)] == ["2", "1"]
+            assert app.screen._draft == ["2", "1"]
+            # ...and the new number still reached the card
+            from claude_swap.tui.widgets import AccountCard
+
+            card = listview.query(AccountItem)[1].query_one(AccountCard)
+            assert "44%" in card.render().plain
+
+    async def test_escape_discards_the_draft_and_stays_on_the_screen(self, tmp_path):
+        from textual.widgets import ListView
+
+        from claude_swap.tui.dashboard import WatchScreen
+        from claude_swap.tui.widgets import AccountItem
+
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("shift+down")
+            await pilot.pause()
+            assert app.screen._draft == ["2", "1"]
+            await pilot.press("escape")
+            await settle(pilot)
+            # first escape leaves reorder mode, not the screen
+            assert isinstance(app.screen, WatchScreen)
+            assert app.screen._draft is None
+            assert fake.calls == []
+            listview = app.screen.query_one("#accounts", ListView)
+            # real slot order is back on screen, cursor gone (monitor mode)
+            assert [i.number for i in listview.query(AccountItem)] == ["1", "2"]
+            assert listview.index is None
+
+    async def test_enter_asks_before_applying_and_cancel_keeps_disk_untouched(
+        self, tmp_path
+    ):
+        from claude_swap.tui.modals import ConfirmModal
+
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("shift+down")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            # a confirm step stands between the draft and the roster
+            assert isinstance(app.screen, ConfirmModal)
+            assert fake.calls == []
+            await pilot.press("n")  # decline
+            await settle(pilot)
+            assert fake.calls == []
+            # still in reorder mode with the draft intact, so nothing is lost
+            assert app.screen._draft == ["2", "1"]
+
+    async def test_confirming_applies_the_draft_via_move_account(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("shift+down")  # 1 goes below 2
+            await pilot.pause()
+            assert app.screen._draft == ["2", "1", "3"]
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("y")  # confirm
+            await settle(pilot)
+            assert fake.calls == [("move", "2", "1")]
+            assert fake.order == [
+                "user2@example.com",
+                "user1@example.com",
+                "user3@example.com",
+            ]
+            # mode ends after a successful apply
+            assert app.screen._draft is None
+
+    async def test_move_past_the_edge_is_ignored(self, tmp_path):
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            # cursor starts on the active account (index 0) — up is the edge
+            await pilot.press("shift+up")
+            await pilot.pause()
+            assert app.screen._draft == ["1", "2"]
+            await pilot.press("shift+down", "shift+down")
+            await pilot.pause()
+            assert app.screen._draft == ["2", "1"]  # second one hits the edge
+
+    async def test_r_and_s_modes_are_mutually_exclusive(self, tmp_path):
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen._selecting is True
+            await pilot.press("r")
+            await pilot.pause()
+            assert app.screen._selecting is False
+            assert app.screen._draft is not None
+            # enter now applies the reorder path, never a switch
+            await pilot.press("enter")
+            await settle(pilot)
+            assert not any(c[0] == "switch_to" for c in fake.calls)
+
+    async def test_enter_with_no_change_just_leaves_the_mode(self, tmp_path):
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            await pilot.press("r")
+            await pilot.pause()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert fake.calls == []
+            assert app.screen._draft is None
+
+
+class TestReorderSwaps:
+    """The permutation → move_account() call sequence (pure, no UI)."""
+
+    def test_no_change_is_no_calls(self):
+        from claude_swap.tui.data import reorder_swaps
+
+        assert reorder_swaps(["1", "2", "3"], ["1", "2", "3"]) == []
+
+    def test_adjacent_swap_is_one_call(self):
+        from claude_swap.tui.data import reorder_swaps
+
+        # account in slot 2 should come first
+        assert reorder_swaps(["1", "2", "3"], ["2", "1", "3"]) == [("2", "1")]
+
+    def test_three_way_rotation_uses_two_swaps(self):
+        from claude_swap.tui.data import reorder_swaps
+
+        swaps = reorder_swaps(["1", "2", "3"], ["3", "1", "2"])
+        assert len(swaps) == 2
+
+    def test_sparse_slot_numbers_are_targeted_by_their_real_numbers(self):
+        from claude_swap.tui.data import reorder_swaps
+
+        # slots 1, 5, 9 — moving the slot-9 account to the front
+        assert reorder_swaps(["1", "5", "9"], ["9", "1", "5"])[0] == ("9", "1")
+
+    def test_swaps_actually_produce_the_desired_order(self):
+        from claude_swap.tui.data import reorder_swaps
+
+        slots = ["1", "2", "3", "4"]
+        desired = ["4", "3", "1", "2"]
+        # replay the swaps against a model of the roster
+        occupant = {s: s for s in slots}  # slot -> account label
+        for acct_slot, target_slot in reorder_swaps(slots, desired):
+            src = next(s for s, a in occupant.items() if a == occupant[acct_slot])
+            occupant[src], occupant[target_slot] = (
+                occupant[target_slot],
+                occupant[src],
+            )
+        assert [occupant[s] for s in slots] == desired
 
 
 def fake_calls(app) -> list[tuple]:

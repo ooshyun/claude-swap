@@ -24,7 +24,13 @@ from claude_swap.settings import load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
-from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
+from claude_swap.tui.data import (
+    ActionResult,
+    SnapshotSource,
+    format_duration,
+    reorder_swaps,
+    run_action,
+)
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
@@ -294,6 +300,24 @@ class CswapApp(App):
             "Switch (best)",
             partial(self.switcher.switch, strategy="best", json_output=True),
         )
+
+    def do_reorder(self, slots: list[str], desired: list[str]) -> None:
+        """Rearrange the roster so the accounts sit in ``desired`` order.
+
+        Applied as the minimal run of ``move_account`` swaps (see
+        ``reorder_swaps``). Each swap is individually transactional under the
+        account lock; a failure part-way leaves the earlier swaps in place,
+        which the action's error report surfaces and the next snapshot shows.
+        """
+        swaps = reorder_swaps(slots, desired)
+        if not swaps:
+            return
+
+        def _apply() -> None:
+            for account, target in swaps:
+                self.switcher.move_account(account, target)
+
+        self._start_action(f"Reorder {len(swaps) + 1} accounts", _apply)
 
     def do_toggle_disabled(self, number: str) -> None:
         """Hold the account out of auto-rotation, or return it — reads its

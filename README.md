@@ -171,6 +171,8 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 On the auto-switch view, `e` expands every other account into a full card (bars, resets, pace) and `c` opens the config table where the global **and per-account** `threshold` / `model` are edited in place — save, and the engine restarts in the same live/dry-run mode.
 
+On the watch view (`cswap watch`), `r` arms reordering: `shift+↑`/`shift+↓` rearrange the accounts as a draft, `Enter` asks for confirmation, and only then are the slots actually swapped (credentials, config backups, aliases and session profiles move with each account). `Esc` discards the draft — nothing is written until you confirm.
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:

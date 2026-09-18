@@ -26,6 +26,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
 from claude_swap.models import AccountsSnapshot
+from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem
 
 if TYPE_CHECKING:
@@ -234,10 +235,25 @@ class AccountListScreen(Screen):
     def on_mount(self) -> None:
         self.watch(self.app, "snapshot", self._on_snapshot)
 
+    def _reorder_draft(self) -> list[str] | None:
+        """The draft row order, when a subclass is mid-reorder (else None)."""
+        return None
+
     async def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         if snap is None:
             return
         listview = self.query_one("#accounts", ListView)
+        if self._reorder_draft() is not None:
+            # Reordering: the draft owns row ORDER, the poll owns row DATA.
+            # Refresh each card in place so the bars stay live without the
+            # snapshot's slot order undoing what the user just arranged.
+            by_num = {acc.number: acc for acc in snap.accounts}
+            for item in listview.query(AccountItem):
+                acc = by_num.get(item.number)
+                if acc is not None:
+                    item.set_account(acc)
+            self._flash_updated(snap, listview)
+            return
         numbers = [acc.number for acc in snap.accounts]
         if numbers != self._numbers:
             first_build = not self._numbers
@@ -335,10 +351,17 @@ class WatchScreen(AccountListScreen):
     ``s`` arms selection (cursor appears on the active account); Enter then
     switches and stays here — you keep watching on the new account. Esc
     disarms selection first, then leaves the screen.
+
+    ``r`` arms reordering instead: shift+↑/↓ rearrange a DRAFT order (nothing
+    is written), Enter opens a confirm step, and only accepting it applies
+    the change as ``move_account`` swaps. Esc discards the draft. While a
+    draft is up the poller keeps refreshing each card's numbers but never
+    reimposes the roster's own slot order.
     """
 
     _WATCH_TITLE = "watching all accounts"
     _SELECT_TITLE = "switch to which account? · enter confirm · esc cancel"
+    _REORDER_TITLE = "reorder accounts · shift+↑↓ move · enter apply · esc cancel"
 
     BINDINGS = [
         Binding("s", "toggle_select", "Switch"),
@@ -347,11 +370,18 @@ class WatchScreen(AccountListScreen):
         Binding("escape,q", "back", "Back"),
         Binding("down,j", "nav_down", show=False),
         Binding("up,k", "nav_up", show=False),
+        Binding("r", "toggle_reorder", "Reorder"),
+        Binding("shift+down,J", "draft_move(1)", "Move down"),
+        Binding("shift+up,K", "draft_move(-1)", "Move up"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._selecting = False
+        # Draft slot order while reordering: account numbers in the order the
+        # user has arranged them. None when not reordering. Nothing is written
+        # until the confirm modal is accepted.
+        self._draft: list[str] | None = None
 
     def on_mount(self) -> None:
         self.watch(self.app, "refresh_status", self._on_refresh_status)
@@ -359,6 +389,8 @@ class WatchScreen(AccountListScreen):
         super().on_mount()
 
     def _title_text(self) -> str:
+        if self._draft is not None:
+            return self._REORDER_TITLE
         if self._selecting:
             return self._SELECT_TITLE
         status = self.app.refresh_status
@@ -369,8 +401,12 @@ class WatchScreen(AccountListScreen):
             self.query_one("#list-title", Static).update(self._title_text())
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action == "select_highlighted" and not self._selecting:
-            return False  # hidden and inert until selection is armed
+        if action == "select_highlighted" and not (
+            self._selecting or self._draft is not None
+        ):
+            return False  # hidden and inert until selection/reorder is armed
+        if action == "draft_move" and self._draft is None:
+            return False  # move keys exist only inside reorder mode
         return True
 
     def _index_after_build(
@@ -399,6 +435,68 @@ class WatchScreen(AccountListScreen):
     def action_toggle_select(self) -> None:
         self._set_selecting(not self._selecting)
 
+    # -- reorder mode ---------------------------------------------------------
+
+    def _reorder_draft(self) -> list[str] | None:
+        return self._draft
+
+    def action_toggle_reorder(self) -> None:
+        if self._draft is not None:
+            self._end_reorder()
+            return
+        snap = self.app.snapshot
+        if snap is None or not snap.accounts:
+            return
+        if self._selecting:
+            self._set_selecting(False)
+        self._draft = [acc.number for acc in snap.accounts]
+        listview = self.query_one("#accounts", ListView)
+        listview.index = self._active_index(snap)
+        listview.focus()
+        self.query_one("#list-title", Static).update(self._title_text())
+        self.refresh_bindings()
+
+    async def action_draft_move(self, delta: int) -> None:
+        """Move the highlighted account one slot up/down — in the draft only."""
+        if self._draft is None:
+            return
+        listview = self.query_one("#accounts", ListView)
+        i = listview.index
+        if i is None:
+            return
+        j = i + delta
+        if not 0 <= j < len(self._draft):
+            return
+        self._draft[i], self._draft[j] = self._draft[j], self._draft[i]
+        await self._render_draft()
+        listview.index = j
+
+    async def _render_draft(self) -> None:
+        """Rebuild the rows in draft order from the live snapshot's cards."""
+        snap = self.app.snapshot
+        if snap is None or self._draft is None:
+            return
+        by_num = {acc.number: acc for acc in snap.accounts}
+        listview = self.query_one("#accounts", ListView)
+        await listview.clear()
+        await listview.extend(
+            AccountItem(by_num[num]) for num in self._draft if num in by_num
+        )
+
+    def _end_reorder(self) -> None:
+        """Leave reorder mode, discarding the draft; the next snapshot
+        repaints the list in its real slot order."""
+        self._draft = None
+        listview = self.query_one("#accounts", ListView)
+        listview.index = None
+        self.set_focus(None)
+        self._numbers = []  # force a rebuild from the live snapshot
+        self.query_one("#list-title", Static).update(self._title_text())
+        self.refresh_bindings()
+        snap = self.app.snapshot
+        if snap is not None:
+            self.call_later(partial(self._on_snapshot, snap))
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if not self._selecting:
             return  # e.g. a stray click while just watching
@@ -408,11 +506,55 @@ class WatchScreen(AccountListScreen):
             self._set_selecting(False)  # stay here, keep watching
 
     def action_select_highlighted(self) -> None:
+        if self._draft is not None:
+            self._confirm_reorder()
+            return
         if self._selecting:
             self.query_one("#accounts", ListView).action_select_cursor()
 
+    def _confirm_reorder(self) -> None:
+        """Enter in reorder mode: nothing is written until this is accepted."""
+        draft = self._draft
+        snap = self.app.snapshot
+        if draft is None or snap is None:
+            return
+        slots = sorted((acc.number for acc in snap.accounts), key=int)
+        if draft == slots:
+            self._end_reorder()  # arranged back to where it started
+            return
+        by_num = {acc.number: acc for acc in snap.accounts}
+        lines = []
+        for slot, num in zip(slots, draft):
+            acc = by_num.get(num)
+            name = acc.email if acc else num
+            was = "" if slot == num else f"   ← was {num}"
+            lines.append(f"  {slot}  {name}{was}")
+        self.app.push_screen(
+            ConfirmModal(
+                "Apply this order?\n\n" + "\n".join(lines) + "\n\n"
+                "Credentials, config backups, aliases and session\n"
+                "profiles move with each account.",
+                title="Reorder accounts",
+                yes_label="Apply",
+            ),
+            self._on_reorder_confirmed,
+        )
+
+    def _on_reorder_confirmed(self, confirmed: bool | None) -> None:
+        draft = self._draft
+        if not confirmed or draft is None:
+            return  # declined: stay in reorder mode, draft untouched
+        snap = self.app.snapshot
+        if snap is None:
+            return
+        slots = sorted((acc.number for acc in snap.accounts), key=int)
+        self._end_reorder()
+        self.app.do_reorder(slots, draft)
+
     def action_back(self) -> None:
-        if self._selecting:
+        if self._draft is not None:
+            self._end_reorder()
+        elif self._selecting:
             self._set_selecting(False)
         else:
             self.app.pop_screen()

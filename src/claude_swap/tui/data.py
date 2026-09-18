@@ -184,6 +184,7 @@ __all__ = [
     "format_age",
     "format_duration",
     "last_seen_note",
+    "reorder_swaps",
     "reset_clock",
     "reset_text",
     "run_action",
@@ -192,3 +193,31 @@ __all__ = [
     "window_pct",
     "window_reset_text",
 ]
+
+
+def reorder_swaps(
+    slots: list[str], desired: list[str]
+) -> list[tuple[str, str]]:
+    """``move_account`` calls that rearrange ``slots`` into ``desired`` order.
+
+    ``slots`` is the slot numbers as they stand, ascending; ``desired`` is the
+    same accounts (labelled by the slot number they occupy NOW) in the order
+    the user wants them. Returns ``(account, target_slot)`` pairs to feed
+    ``ClaudeAccountSwitcher.move_account`` in order — each one a swap, so the
+    displaced account is never lost.
+
+    Selection-sort over the permutation: at most ``len(slots) - 1`` swaps, and
+    none at all when the order is already right. Accounts are addressed by
+    their CURRENT slot number, which changes as the swaps land, so the
+    occupant map is tracked here rather than recomputed from the roster.
+    """
+    cur = list(slots)  # cur[i] = account currently sitting in slots[i]
+    out: list[tuple[str, str]] = []
+    for i, want in enumerate(desired):
+        if cur[i] == want:
+            continue
+        j = cur.index(want)
+        # the wanted account sits in slots[j]; send it to slots[i]
+        out.append((slots[j], slots[i]))
+        cur[i], cur[j] = cur[j], cur[i]
+    return out
