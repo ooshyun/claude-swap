@@ -3210,11 +3210,14 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         from claude_swap.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
-            def __init__(self):
+            def __init__(self, settings):
                 self._models = ()
+                self._override_threshold = {}
+                self._override_models = {}
+                self.settings = settings
 
-        e = Fake()
         settings = AutoSwitchSettings()
+        e = Fake(settings)
         now = 1_000_000.0
         usage = {"1": _usage(89.0), "2": _usage(95.0)}   # peer 11 pts, active 5 pts
         headroom = {"1": 11.0}
@@ -3259,11 +3262,14 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         from claude_swap.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
-            def __init__(self):
+            def __init__(self, settings):
                 self._models = ()
+                self._override_threshold = {}
+                self._override_models = {}
+                self.settings = settings
 
-        e = Fake()
         settings = AutoSwitchSettings()
+        e = Fake(settings)
         now = 1_000_000.0
         usage = {"1": _usage(89.0), "2": _usage(95.0)}
         headroom = {"1": 11.0}
@@ -3295,11 +3301,14 @@ class TestConsumeFirstDepartureRecordsItsOwnTrigger:
         from claude_swap.settings import AutoSwitchSettings
 
         class Fake(AutoSwitchEngine):
-            def __init__(self):
+            def __init__(self, settings):
                 self._models = ()
+                self._override_threshold = {}
+                self._override_models = {}
+                self.settings = settings
 
-        e = Fake()
         settings = AutoSwitchSettings()
+        e = Fake(settings)
         now = 1_000_000.0
         usage = {"1": _usage(89.0), "2": _usage(95.0)}  # peer 11 pts, active 5 pts
         headroom = {"1": 11.0}

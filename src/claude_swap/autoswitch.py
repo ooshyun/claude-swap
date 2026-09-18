@@ -596,6 +596,8 @@ def _every_account_above_threshold(
     headroom: dict[str, float | None],
     active_headroom: float | None,
     threshold: float,
+    *,
+    threshold_for: Callable[[str], float] | None = None,
 ) -> bool:
     """Whether the active account AND every measured candidate are at or over
     the threshold — the state where "land somewhere healthy" has no answer.
@@ -605,13 +607,20 @@ def _every_account_above_threshold(
     rule on an ordinary tick. An unmeasured candidate does not block the
     verdict (it may be healthy, but it cannot be *chosen* either — the caller
     skips ``None`` headroom) as long as at least one candidate was measured.
+
+    ``threshold`` is the ACTIVE account's line. ``threshold_for`` gives each
+    candidate its own line (per-account overrides); ``None`` means every
+    candidate shares ``threshold``.
     """
     if active_headroom is None or (100.0 - active_headroom) < threshold:
         return False
-    measured = [headroom.get(n) for n in candidates if headroom.get(n) is not None]
+    measured = [
+        (n, headroom.get(n)) for n in candidates if headroom.get(n) is not None
+    ]
     if not measured:
         return False
-    return all((100.0 - h) >= threshold for h in measured)
+    line = threshold_for or (lambda _n: threshold)
+    return all((100.0 - h) >= line(n) for n, h in measured)
 
 
 def _ref(number: str, email: str) -> dict:
@@ -619,12 +628,17 @@ def _ref(number: str, email: str) -> dict:
 
 
 def _headroom_by_account(
-    usage: dict[str, dict | str | None], models: tuple[str, ...]
+    usage: dict[str, dict | str | None],
+    models: tuple[str, ...],
+    *,
+    models_for: Callable[[str], tuple[str, ...]] | None = None,
 ) -> dict[str, float | None]:
-    """Per-account headroom derived from decision values."""
+    """Per-account headroom derived from decision values, each account on its
+    own model axes when ``models_for`` is given (else all on ``models``)."""
+    axes = models_for or (lambda _n: models)
     return {
         num: oauth.account_headroom(
-            value if isinstance(value, dict) else None, models
+            value if isinstance(value, dict) else None, axes(num)
         )
         for num, value in usage.items()
     }
@@ -656,6 +670,11 @@ class AutoSwitchEngine:
         # pass everywhere usage windows are read — decisions, cadence, and
         # reset scheduling must all see the same axes.
         self._models = parse_model_names(settings.model)
+        # Per-account overrides of the threshold / model axes (Task 4 fills
+        # these from the roster; empty means every account uses the globals).
+        # Fixed at construction like ``_models`` — a change restarts the engine.
+        self._override_threshold: dict[str, float] = {}
+        self._override_models: dict[str, tuple[str, ...]] = {}
         # Poll plans written by the collector must key on the same threshold/
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
@@ -684,6 +703,28 @@ class AutoSwitchEngine:
         # warned) on the first tick where every relevant account has readable
         # usage — adaptive polling legitimately leaves gaps before that.
         self._model_check_done = not self._models
+
+    # -- per-account axes ---------------------------------------------------
+
+    def _threshold_for(self, num: str | None) -> float:
+        """The threshold ``num`` is judged on: its override, else the global.
+
+        Reads ``self.settings`` live (not a snapshot) so the TUI's session
+        ``apply_threshold`` keeps steering every account WITHOUT an override.
+        """
+        if num is not None:
+            value = self._override_threshold.get(str(num))
+            if value is not None:
+                return value
+        return self.settings.threshold
+
+    def _models_for(self, num: str | None) -> tuple[str, ...]:
+        """The model axes ``num`` is judged on: its override, else the global."""
+        if num is not None:
+            value = self._override_models.get(str(num))
+            if value is not None:
+                return value
+        return self._models
 
     # -- state file ---------------------------------------------------------
 
@@ -928,6 +969,7 @@ class AutoSwitchEngine:
                 )
             return TickOutcome.NO_ACTION
 
+        active_threshold = self._threshold_for(current)
         current_email = self.switcher.account_email(current)
         active_ref = _ref(current, current_email) if current_email else {
             "number": int(current),
@@ -935,13 +977,13 @@ class AutoSwitchEngine:
         }
 
         entries, usage, headroom = self._collect_scheduled_usage(
-            current, quarantined, threshold=settings.threshold
+            current, quarantined, threshold=active_threshold
         )
         self._emit(
             PollEvent(
                 active=active_ref,
                 headroom=headroom,
-                threshold=settings.threshold,
+                threshold=active_threshold,
                 fetch_errors={
                     num: entry.last_error
                     for num, entry in entries.items()
@@ -951,7 +993,7 @@ class AutoSwitchEngine:
                     num: pcts
                     for num, value in usage.items()
                     if (pcts := _window_pcts(
-                        value if isinstance(value, dict) else None, self._models
+                        value if isinstance(value, dict) else None, self._models_for(num)
                     ))
                 },
             )
@@ -977,7 +1019,7 @@ class AutoSwitchEngine:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            if utilization < active_threshold:
                 if settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
@@ -986,7 +1028,7 @@ class AutoSwitchEngine:
                             # display an impossible "100% < 99.9%".
                             detail=(
                                 f"{pct_label(utilization)}% < "
-                                f"{pct_label(settings.threshold)}%"
+                                f"{pct_label(active_threshold)}%"
                             ),
                         )
                     )
@@ -1086,7 +1128,7 @@ class AutoSwitchEngine:
                     reason="below-threshold",
                     detail=(
                         f"{pct_label(100.0 - active_headroom)}% < "
-                        f"{pct_label(settings.threshold)}%"
+                        f"{pct_label(active_threshold)}%"
                     ),
                 )
             )
@@ -1202,7 +1244,7 @@ class AutoSwitchEngine:
                 fetch={current, *candidates}
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
-            headroom = _headroom_by_account(usage, self._models)
+            headroom = _headroom_by_account(usage, self._models, models_for=self._models_for)
             active_headroom = headroom.get(current)
             decided_now = self.clock()
             ordered, any_known, active_reset_ts = _rank(
@@ -1307,7 +1349,7 @@ class AutoSwitchEngine:
         # consume-first that is the phase-2 refetch, not the stale one.
         left_snapshot = (
             active_headroom,
-            _binding_recovery_ts(usage.get(current), self._models, decided_now),
+            _binding_recovery_ts(usage.get(current), self._models_for(current), decided_now),
         )
         transient_failure = False
         systemic = ""
@@ -1491,10 +1533,7 @@ class AutoSwitchEngine:
             if active_headroom is not None:
                 if left_headroom >= active_headroom * HORIZON_HEADROOM_RATIO:
                     return None               # beats us outright; not a flip
-            elif (
-                settings is not None
-                and left_headroom > 100.0 - settings.threshold
-            ):
+            elif left_headroom > 100.0 - self._threshold_for(barred):
                 # An unreadable active must not be silently scored as "the
                 # peer does not beat it" -- same landing-eligible fallback
                 # `_left_account_recovered` uses when it, too, has no active
@@ -1669,10 +1708,14 @@ class AutoSwitchEngine:
             # when a nearer window starts binding, never as a side effect
             # of the active spending down -- the failure mode a bare
             # dominance leg has, guarded directly in the mutation table.
-            if h is not None and h > 100.0 - settings.threshold:
+            if h is not None and h > 100.0 - self._threshold_for(barred):
                 return True
-            peer_recovery_ts = _binding_recovery_ts(usage.get(barred), self._models, now)
-            active_recovery_ts = _binding_recovery_ts(usage.get(current), self._models, now)
+            peer_recovery_ts = _binding_recovery_ts(
+                usage.get(barred), self._models_for(barred), now
+            )
+            active_recovery_ts = _binding_recovery_ts(
+                usage.get(current), self._models_for(current), now
+            )
             # The active's recovery must be a REAL measurement, not merely
             # "larger" -- `_binding_recovery_ts` returns `inf` for both
             # "never resets" and "we do not know" (no windows, no
@@ -1735,7 +1778,7 @@ class AutoSwitchEngine:
             if active_headroom is not None:
                 if h > active_headroom * HORIZON_HEADROOM_RATIO + SPENT_HEADROOM_PCT:
                     return True
-            elif h > 100.0 - settings.threshold:
+            elif h > 100.0 - self._threshold_for(barred):
                 return True
         if (
             isinstance(left_headroom, (int, float))
@@ -1748,7 +1791,7 @@ class AutoSwitchEngine:
         # schedule around. Moving off it onto a real reset IS the improvement.
         was = left_recovery if isinstance(left_recovery, (int, float)) else float("inf")
         return (
-            _binding_recovery_ts(usage.get(barred), self._models, now)
+            _binding_recovery_ts(usage.get(barred), self._models_for(barred), now)
             < was - RECOVERY_HYSTERESIS_S
         )
 
@@ -1791,7 +1834,11 @@ class AutoSwitchEngine:
         # wins the normal way, and RECOVERY_HYSTERESIS_S below replaces the
         # percentage-point margin so two accounts in the 90s cannot ping-pong.
         all_above = _every_account_above_threshold(
-            oauth_candidates, headroom, active_headroom, settings.threshold
+            oauth_candidates,
+            headroom,
+            active_headroom,
+            self._threshold_for(current),
+            threshold_for=self._threshold_for,
         )
         # "Is anything worth having?" — the most headroom any candidate with a
         # READABLE row offers. Two exclusions and no others:
@@ -1818,7 +1865,7 @@ class AutoSwitchEngine:
             default=0.0,
         )
         active_recovery_ts = (
-            _binding_recovery_ts(usage.get(current), self._models, now)
+            _binding_recovery_ts(usage.get(current), self._models_for(current), now)
             if all_above
             else 0.0  # unread unless all_above; never a live sentinel
         )
@@ -1839,7 +1886,7 @@ class AutoSwitchEngine:
                 _seven_day_reset_ts(usage.get(num), now) if consume_first else None
             )
             recovery_ts = (
-                _binding_recovery_ts(usage.get(num), self._models, now)
+                _binding_recovery_ts(usage.get(num), self._models_for(num), now)
                 if all_above
                 else 0.0
             )
@@ -1848,7 +1895,7 @@ class AutoSwitchEngine:
                 # would re-trigger on the very next tick. At-limit and failover
                 # are escapes that skip this whole block — any account with real
                 # headroom beats a blocked or dead one.
-                if (100.0 - h) >= settings.threshold and not all_above:
+                if (100.0 - h) >= self._threshold_for(num) and not all_above:
                     continue
                 if all_above:
                     # Checked before the strategies, because with nothing below
@@ -2017,7 +2064,7 @@ class AutoSwitchEngine:
             and active_pre.age_s >= poll_policy.ACTIVE_MAX_INTERVAL_S
             and (active_pre.poll_interval_s or 0.0)
             > poll_policy.ACTIVE_MAX_INTERVAL_S
-            and (binding_pct(active_pre.last_good, self._models) or 0.0) < 100.0
+            and (binding_pct(active_pre.last_good, self._models_for(current)) or 0.0) < 100.0
         )
         overslept_plan = (
             active_pre is not None
@@ -2053,12 +2100,13 @@ class AutoSwitchEngine:
 
         active_value = usage.get(current)
         active_headroom = oauth.account_headroom(
-            active_value if isinstance(active_value, dict) else None, self._models
+            active_value if isinstance(active_value, dict) else None,
+            self._models_for(current),
         )
         # The caller's tick-snapshotted threshold, so one tick fetches and
         # decides on the same value even if apply_threshold() lands mid-tick.
         if threshold is None:
-            threshold = self.settings.threshold
+            threshold = self._threshold_for(current)
         escalate = bool(candidates) and (
             (active_headroom is None and active_value != USAGE_TOKEN_EXPIRED)
             or (
@@ -2076,7 +2124,7 @@ class AutoSwitchEngine:
                 entry = entries.get(num)
                 value = usage.get(num)
                 planned_headroom = oauth.account_headroom(
-                    value if isinstance(value, dict) else None, self._models
+                    value if isinstance(value, dict) else None, self._models_for(num)
                 )
                 if (
                     entry is not None
@@ -2093,7 +2141,7 @@ class AutoSwitchEngine:
             )
             usage = {num: entry.decision_value() for num, entry in entries.items()}
 
-        headroom = _headroom_by_account(usage, self._models)
+        headroom = _headroom_by_account(usage, self._models, models_for=self._models_for)
         return entries, usage, headroom
 
     def _perform(
@@ -2190,7 +2238,10 @@ class AutoSwitchEngine:
         polling legitimately leaves gaps before that — and never worth a
         forced refresh of its own.
         """
-        wanted = {m.lower(): m for m in self._models if m.lower() != "all"}
+        configured = set(self._models)
+        for axes in self._override_models.values():
+            configured.update(axes)
+        wanted = {m.lower(): m for m in configured if m.lower() != "all"}
         if not wanted:
             self._model_check_done = True  # bare "all" needs no name match
             return
@@ -2240,17 +2291,17 @@ class AutoSwitchEngine:
         later known reset."""
         earliest: float | None = None
         now = self.clock()
-        for value in usage.values():
+        for num, value in usage.items():
             if not isinstance(value, dict):
                 continue
             blocked = [
                 resets_at
-                for _, pct, resets_at in oauth.relevant_windows(value, self._models)
+                for _, pct, resets_at in oauth.relevant_windows(value, self._models_for(num))
                 if pct >= 100.0
             ]
             if not blocked:
                 continue  # not exhausted — doesn't gate the blocked state
-            usable_at = _limiting_reset_ts(value, self._models)
+            usable_at = _limiting_reset_ts(value, self._models_for(num))
             if usable_at is None or usable_at <= now:
                 return None  # blocked with unprovable recovery — don't oversleep
             if earliest is None or usable_at < earliest:
