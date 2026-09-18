@@ -752,3 +752,16 @@ class TestAccountRowDisabled:
     def test_disabled_absent_by_default(self):
         row = account_row(1, "a@example.com", "", "", False, None)
         assert "disabled" not in row
+
+    def test_autoswitch_override_included_when_present(self):
+        row = account_row(
+            2, "b@example.com", "", "", False, None,
+            autoswitch_override={"threshold": 80.0},
+        )
+        assert row["autoswitchOverride"] == {"threshold": 80.0}
+
+    def test_autoswitch_override_absent_when_empty(self):
+        row = account_row(1, "a@example.com", "", "", False, None, autoswitch_override={})
+        assert "autoswitchOverride" not in row
+        row = account_row(1, "a@example.com", "", "", False, None)
+        assert "autoswitchOverride" not in row

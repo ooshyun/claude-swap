@@ -243,6 +243,7 @@ def account_row(
     alias: str = "",
     disabled: bool = False,
     login_expires_at: str | None = None,
+    autoswitch_override: dict | None = None,
 ) -> dict:
     """A full account row for ``--list``. ``backoff_until`` is the live
     backoff only; a lapsed one is the caller's to withhold."""
@@ -268,6 +269,10 @@ def account_row(
     # ``relogin_required`` that follows; absent when the login carries none.
     if login_expires_at:
         row["loginExpiresAt"] = login_expires_at
+    # Additive field: the slot's own autoswitch threshold/model, when set
+    # (``cswap config --account``); absent when it inherits the globals.
+    if autoswitch_override:
+        row["autoswitchOverride"] = dict(autoswitch_override)
     if usage is not None:
         row.update(usage_freshness_fields(usage_fetched_at, usage_age_s))
     else:

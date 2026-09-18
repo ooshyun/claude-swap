@@ -5619,6 +5619,9 @@ class ClaudeAccountSwitcher:
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, str(num)),
                     login_expires_at=oauth.login_expires_at_iso(creds),
+                    autoswitch_override=self._autoswitch_override_from_data(
+                        seq_data, str(num)
+                    ),
                 )
             )
         payload = {

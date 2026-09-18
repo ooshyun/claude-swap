@@ -12625,3 +12625,13 @@ class TestAutoswitchOverride:
                 "2": (2, "b@example.com", "", "", False, "", "")}
         s._plans_after_fetch(records, pre={}, info_by_num=info)
         assert seen == {True: 90.0, False: 60.0}
+
+    def test_list_json_carries_override(self, temp_home, capsys):
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        s.set_account_autoswitch_override("2", model="Fable")
+        payload = s.list_accounts(json_output=True)
+        rows = {r["number"]: r for r in payload["accounts"]}
+        assert rows[2]["autoswitchOverride"] == {"model": "Fable"}
+        assert "autoswitchOverride" not in rows[1]
