@@ -853,6 +853,7 @@ class TestDashboard:
                 "disable-menu",
                 "remove-menu",
                 "theme-menu",
+                "help",
                 "quit",
             ]
             # nest into Add (index 3), then back out with escape
@@ -2040,6 +2041,77 @@ class TestBareInvocation:
 # ---------------------------------------------------------------------------
 # Theme wiring
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestHelpModal:
+    async def test_question_mark_opens_and_closes_help(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.modals import HelpModal
+
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpModal)
+            body = str(app.screen.query_one("#help-body").render())
+            for title, _ in app.HELP_SCREENS:
+                assert title in body
+            assert "Switch accounts" in body and "esc / ←" in body
+            # pressing ? again inside help closes it rather than stacking
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpModal)
+
+    async def test_menu_entry_opens_help(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from textual.widgets import ListView
+
+            from claude_swap.tui.modals import HelpModal
+
+            menu = app.screen.query_one("#menu", ListView)
+            menu.index = [i.action_id for i in menu.children].index("help")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpModal)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpModal)
+
+    async def test_question_mark_in_a_text_field_types_it(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from textual.widgets import Input
+
+            from claude_swap.tui.modals import AddTokenModal, HelpModal
+
+            app.action_add_token()
+            await pilot.pause()
+            assert isinstance(app.screen, AddTokenModal)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpModal)
+            assert "?" in app.screen.focused.value
+            assert isinstance(app.screen.focused, Input)
+
+    async def test_rows_follow_bindings(self, tmp_path):
+        from textual.binding import Binding
+
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        rows = app._binding_rows(
+            [
+                Binding("escape,q", "back", "Back"),
+                Binding("j", "cursor_down", show=False),
+                Binding("g", "app.open_auto", "Auto view", show=False),
+            ]
+        )
+        assert rows == [("esc / q", "Back"), ("g", "Auto view")]
 
 
 @pytest.mark.asyncio

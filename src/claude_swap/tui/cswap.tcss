@@ -130,7 +130,7 @@ MenuItem Static.menu-item-muted { color: $secondary; }
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal {
+ConfirmModal, AddTokenModal, OutputModal, HelpModal {
     align: center middle;
     background: $background 60%;
 }
@@ -200,6 +200,10 @@ ConfirmModal, AddTokenModal, OutputModal {
     max-height: 20;
     background: $background;
     padding: 1;
+}
+
+HelpModal .modal-output {
+    max-height: 30;
 }
 
 .form-error {
