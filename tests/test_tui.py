@@ -117,8 +117,14 @@ def make_usage_at(
 class FakeSwitcher:
     """Structured-surface stand-in for ClaudeAccountSwitcher."""
 
-    def __init__(self, accounts: list[AccountSnapshot], backup_dir: Path):
+    def __init__(
+        self,
+        accounts: list[AccountSnapshot],
+        backup_dir: Path,
+        codex=None,
+    ):
         self._accounts = list(accounts)
+        self.codex = codex
         self.backup_dir = backup_dir
         self.active = next(
             (a.number for a in accounts if a.is_active), None
@@ -135,6 +141,7 @@ class FakeSwitcher:
             active_number=self.active,
             accounts=tuple(self._accounts),
             taken_at=time.time(),
+            codex=self.codex,
         )
 
     def current_account_number(self) -> str | None:
@@ -283,6 +290,16 @@ class BlockingSnapshotSwitcher(FakeSwitcher):
             accounts=(account,),
             taken_at=time.time(),
         )
+
+
+def make_codex(source: str = "live"):
+    from claude_swap.codex_usage import CodexUsage
+
+    return CodexUsage(
+        plan="plus",
+        entry=make_entry(None, 27.0),
+        source=source,
+    )
 
 
 def make_app(fake: FakeSwitcher):
@@ -1140,6 +1157,59 @@ class TestDashboard:
         from claude_swap.tui.app import CswapApp
 
         assert CswapApp.ENABLE_COMMAND_PALETTE is False
+
+
+@pytest.mark.asyncio
+class TestCodexBlock:
+    def _accounts(self):
+        return [make_account(1, active=True), make_account(2)]
+
+    async def test_panel_shows_codex_when_present(self, tmp_path):
+        fake = FakeSwitcher(self._accounts(), tmp_path, codex=make_codex())
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel
+
+            panel = app.screen.query_one(AccountsPanel).render().plain
+            assert "Codex  [plus]" in panel
+            assert "27%" in panel
+            assert "from last Codex session" not in panel
+
+    async def test_panel_notes_session_log_source(self, tmp_path):
+        fake = FakeSwitcher(
+            self._accounts(), tmp_path, codex=make_codex("session-log")
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel
+
+            panel = app.screen.query_one(AccountsPanel).render().plain
+            assert "from last Codex session" in panel
+
+    async def test_panel_omits_codex_when_absent(self, tmp_path):
+        app = make_app(FakeSwitcher(self._accounts(), tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel
+
+            assert "Codex" not in app.screen.query_one(AccountsPanel).render().plain
+
+    async def test_watch_screen_codex_panel(self, tmp_path):
+        for codex, shown in ((make_codex(), True), (None, False)):
+            app = make_app(FakeSwitcher(self._accounts(), tmp_path, codex=codex))
+            async with app.run_test(size=(100, 40)) as pilot:
+                await settle(pilot)
+                await pilot.press("w")
+                await pilot.pause()
+                from claude_swap.tui.widgets import CodexPanel
+
+                panel = app.screen.query_one("#codex-panel", CodexPanel)
+                assert panel.display is shown
+                if shown:
+                    plain = panel.render().plain
+                    assert "Codex  [plus]" in plain and "27%" in plain
 
 
 @pytest.mark.asyncio

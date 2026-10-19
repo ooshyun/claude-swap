@@ -27,7 +27,7 @@ from textual.widgets import Footer, ListView, Static
 
 from claude_swap.models import AccountsSnapshot
 from claude_swap.tui.modals import ConfirmModal
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem
+from claude_swap.tui.widgets import AccountItem, AccountsPanel, CodexPanel, MenuItem
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -376,6 +376,13 @@ class WatchScreen(AccountListScreen):
         Binding("shift+down,J", "draft_move(1)", "Move down"),
         Binding("shift+up,K", "draft_move(-1)", "Move up"),
     ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="list-title")
+        yield ListView(id="accounts")
+        # Outside the ListView: its index math assumes every row is an AccountItem.
+        yield CodexPanel(id="codex-panel")
+        yield Footer()
 
     def __init__(self) -> None:
         super().__init__()

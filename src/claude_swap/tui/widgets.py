@@ -16,13 +16,15 @@ from textual.widgets import ListItem, Static
 
 from claude_swap import pace
 from claude_swap.json_output import USAGE_API_KEY
+from claude_swap.codex_usage import CodexUsage
 from claude_swap.models import AccountSnapshot
 from claude_swap.switcher import ERROR_NOTES
-from claude_swap.usage_store import STALE_OK_S
+from claude_swap.usage_store import STALE_OK_S, UsageEntry
 from claude_swap.tui import data
 from claude_swap.tui.theme import Palette
 
 if TYPE_CHECKING:
+    from claude_swap.models import AccountsSnapshot
     from claude_swap.tui.app import CswapApp
 
 _BAR_FILLED = "━"
@@ -215,7 +217,24 @@ def account_card_text(
             text.append(f" · {note}", style=palette.muted)
         return text
 
-    stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
+    _append_usage_bars(
+        text, acc.usage, rows, width, threshold=threshold, palette=palette
+    )
+    return text
+
+
+def _append_usage_bars(
+    text: Text,
+    usage: UsageEntry,
+    rows: list,
+    width: int,
+    *,
+    threshold: float | None,
+    palette: Palette,
+) -> None:
+    """Append one indented bar row per usage window (shared by the account
+    cards and the Codex block)."""
+    stale = usage.age_s is not None and usage.age_s > STALE_OK_S
     label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     # everything on a row except the suffix: indent, label, bar, " NNN%", gap
@@ -237,6 +256,39 @@ def account_card_text(
                 palette=palette,
             )
         )
+
+
+def codex_block_text(
+    codex: CodexUsage,
+    width: int,
+    *,
+    now: float | None = None,
+    palette: Palette = Palette.DARK,
+) -> Text:
+    """Read-only Codex block: a header (no slot number, never active) plus
+    the same bar rows an account card shows."""
+    now = now if now is not None else time.time()
+    entry = codex.entry
+    text = Text()
+    text.append("Codex", style=f"bold {palette.foreground}")
+    if codex.plan:
+        text.append(f"  [{codex.plan}]", style=palette.muted)
+    age = data.format_age(entry.age_s)
+    if age:
+        text.append(f"   {age}", style=palette.muted)
+    rows = usage_rows(entry.last_good, now, entry.fetched_at)
+    if not rows:
+        text.append("\n    ")
+        text.append("usage unavailable", style=palette.muted)
+        if entry.last_error:
+            note = ERROR_NOTES.get(entry.last_error, entry.last_error)
+            text.append(f" · {note}", style=palette.muted)
+        return text
+    # No threshold tick: it is the Claude auto-switch trigger, meaningless here.
+    _append_usage_bars(text, entry, rows, width, threshold=None, palette=palette)
+    if codex.source == "session-log":
+        text.append("\n    ")
+        text.append("from last Codex session", style=palette.muted)
     return text
 
 
@@ -345,6 +397,10 @@ class AccountsPanel(Static):
                 )
             elif self._show_minis:
                 blocks.append(mini_account_text(acc, now, palette=palette))
+        if self._show_minis and snap.codex is not None:
+            blocks.append(
+                codex_block_text(snap.codex, width, now=now, palette=palette)
+            )
         if not blocks:
             return Text("no active managed login", style=palette.muted)
         text = Text()
@@ -357,6 +413,31 @@ class AccountsPanel(Static):
             text.append(block)
             previous_multiline = multiline
         return text
+
+
+class CodexPanel(Static):
+    """Read-only Codex usage block shown under a ListView of accounts;
+    hidden while the snapshot carries no Codex data."""
+
+    def on_mount(self) -> None:
+        self.display = False
+        self.watch(self.app, "snapshot", self._on_snapshot)
+        self.watch(self.app, "theme", lambda _t: self.refresh(layout=True))
+
+    def _on_snapshot(self, snap: "AccountsSnapshot | None") -> None:
+        codex = snap.codex if snap is not None else None
+        self.display = codex is not None
+        self.refresh(layout=True)
+
+    def render(self) -> Text:
+        app: "CswapApp" = self.app  # type: ignore[assignment]
+        snap = app.snapshot
+        if snap is None or snap.codex is None:
+            return Text("")
+        return codex_block_text(
+            snap.codex, (self.size.width or 80) - 2,
+            palette=Palette.from_theme(app.current_theme),
+        )
 
 
 class AccountCard(Static):

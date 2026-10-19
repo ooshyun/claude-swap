@@ -169,6 +169,8 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
+If you are also logged in to the OpenAI Codex CLI with a ChatGPT plan, `cswap list`, the dashboard, and the watch view add a read-only **Codex** block with its rate-limit usage. It reads the login in `~/.codex/auth.json` (or `$CODEX_HOME`) and never refreshes or writes that token, so Codex is not logged out; when the live request is rejected it falls back to the last rate limits in Codex's session logs and says so. Codex is never a switch target and takes no part in auto-switch.
+
 On the auto-switch view, `e` expands every other account into a full card (bars, resets, pace) and `c` opens the config table where the global **and per-account** `threshold` / `model` are edited in place — save, and the engine restarts in the same live/dry-run mode. That table's `auto-target` column is the same flag as [`cswap disable`](#automatic-switching): `o` turns it `off` so auto-switch never picks that account, while explicit switches (including the TUI's own Switch screen) still go there.
 
 On the watch view (`cswap watch`), `r` arms reordering: `shift+↑`/`shift+↓` rearrange the accounts as a draft, `Enter` asks for confirmation, and only then are the slots actually swapped (credentials, config backups, aliases and session profiles move with each account). `Esc` discards the draft — nothing is written until you confirm.

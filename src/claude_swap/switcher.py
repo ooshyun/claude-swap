@@ -41,6 +41,7 @@ from claude_swap.json_output import (
     usage_failure_fields,
     usage_fields,
     usage_freshness_fields,
+    usage_to_json,
 )
 from claude_swap.credentials import (  # noqa: F401  (constants re-exported for migrations/tests)
     CLAUDE_CODE_KEYCHAIN_SERVICE,
@@ -85,6 +86,7 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
+from claude_swap.codex_usage import CodexUsage, read_codex_usage
 from claude_swap.settings import (
     SETTING_SPECS,
     load_settings,
@@ -269,6 +271,25 @@ def _usage_entry_lines(entry: UsageEntry) -> list[str]:
     if entry.last_error:
         detail += f" ({ERROR_NOTES.get(entry.last_error, entry.last_error)})"
     return [dimmed(detail)]
+
+
+def codex_to_json(codex: CodexUsage) -> dict:
+    """The additive ``codex`` block of the ``list --json`` payload."""
+    entry = codex.entry
+    out: dict = {
+        "plan": codex.plan,
+        "source": codex.source,
+        "usage": (
+            usage_to_json(entry.last_good, entry.fetched_at)
+            if entry.last_good
+            else None
+        ),
+        "usageFetchedAt": entry.fetched_at,
+        "usageAgeSeconds": entry.age_s,
+    }
+    if entry.last_error:
+        out["usageError"] = entry.last_error
+    return out
 
 
 def _label_token_status(source: str, credentials: str) -> str | None:
@@ -1790,6 +1811,7 @@ class ClaudeAccountSwitcher:
             active_number=active_number,
             accounts=tuple(accounts),
             taken_at=self._usage_store.clock(),
+            codex=read_codex_usage(self.backup_dir / "cache", fetch=fetch is None),
         )
 
     def usage_fetch_stamps(self) -> dict[str, float | None]:
@@ -5591,6 +5613,7 @@ class ClaudeAccountSwitcher:
         self,
         accounts_info: list[tuple[int, str, str, str, bool, str, str]],
         entries: dict[str, UsageEntry],
+        codex: CodexUsage | None = None,
     ) -> dict:
         """Build the ``--list --json`` payload from gathered account + usage data."""
         active_num: int | None = None
@@ -5640,6 +5663,8 @@ class ClaudeAccountSwitcher:
         unclaimed = self._store._list_unclaimed_credentials()
         if unclaimed:
             payload["unclaimedCredentials"] = sorted(unclaimed)
+        if codex is not None:
+            payload["codex"] = codex_to_json(codex)
         return payload
 
     def list_accounts(
@@ -5672,9 +5697,10 @@ class ClaudeAccountSwitcher:
 
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
+        codex = read_codex_usage(self.backup_dir / "cache", fetch=fetch is None)
 
         if json_output:
-            return self._build_list_payload(accounts_info, entries)
+            return self._build_list_payload(accounts_info, entries, codex)
 
         seq_data = self._get_sequence_data() or {}
         print(bolded("Accounts:"))
@@ -5695,6 +5721,15 @@ class ClaudeAccountSwitcher:
                     print(f"     {dimmed('•')} {muted(line)}")
             if i < len(accounts_info) - 1:
                 print()
+
+        if codex is not None:
+            print()
+            plan_tag = f" {muted(f'[{codex.plan}]')}" if codex.plan else ""
+            print(f"  {bolded('Codex')}{plan_tag}")
+            for line in _usage_entry_lines(codex.entry):
+                print(f"     {line}")
+            if codex.source == "session-log":
+                print(f"     {muted('from last Codex session')}")
 
         # Safety copies (unclaimed credentials) are deliberately NOT surfaced
         # here: users can't act on them (recovery is always /login + cswap

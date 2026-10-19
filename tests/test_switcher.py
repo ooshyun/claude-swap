@@ -14,7 +14,7 @@ import pytest
 
 from claude_swap import macos_keychain
 from claude_swap import oauth
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import SCHEMA_VERSION, USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
 from claude_swap.exceptions import (
     AccountNotFoundError,
     ConfigError,
@@ -1274,6 +1274,70 @@ class TestLiveSessionGuardOnAnUnreadableRecord:
         self._sessions_dir(switcher)
 
         switcher._ensure_no_live_session("2", "test@example.com", "the operation")
+
+
+class TestListAccountsCodex:
+    """``cswap list`` shows read-only Codex usage when Codex is set up."""
+
+    @staticmethod
+    def _codex(source: str = "live"):
+        from claude_swap.codex_usage import CodexUsage
+        from claude_swap.usage_store import UsageEntry
+
+        return CodexUsage(
+            plan="plus",
+            entry=UsageEntry(
+                last_good={"seven_day": {
+                    "pct": 27.0, "resets_at": "2099-01-01T00:00:00Z",
+                }},
+                fetched_at=time.time() - 5,
+                age_s=5.0,
+            ),
+            source=source,
+        )
+
+    def _switcher(self, sample_sequence_data):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+        return switcher
+
+    def _list(self, switcher, codex, **kw):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "sk"}})
+        with patch.object(switcher, "_read_credentials", return_value=creds), \
+             patch.object(switcher, "_read_account_credentials", return_value=creds), \
+             patch("claude_swap.oauth.urllib.request.urlopen", side_effect=OSError), \
+             patch("claude_swap.switcher.read_codex_usage", return_value=codex):
+            return switcher.list_accounts(**kw)
+
+    def test_list_prints_codex_block(
+        self, temp_home, mock_claude_config, sample_sequence_data, capsys
+    ):
+        self._list(self._switcher(sample_sequence_data), self._codex("session-log"))
+        out = capsys.readouterr().out
+        assert "Codex [plus]" in out
+        codex_part = out.split("Codex [plus]", 1)[1]
+        assert "7d:" in codex_part and "27%" in codex_part
+        assert "from last Codex session" in codex_part
+
+    def test_list_prints_nothing_without_codex(
+        self, temp_home, mock_claude_config, sample_sequence_data, capsys
+    ):
+        self._list(self._switcher(sample_sequence_data), None)
+        assert "Codex" not in capsys.readouterr().out
+
+    def test_json_codex_key_only_when_present(
+        self, temp_home, mock_claude_config, sample_sequence_data
+    ):
+        switcher = self._switcher(sample_sequence_data)
+        with_codex = self._list(switcher, self._codex(), json_output=True)
+        assert with_codex["schemaVersion"] == SCHEMA_VERSION
+        block = with_codex["codex"]
+        assert block["plan"] == "plus" and block["source"] == "live"
+        assert block["usage"]["sevenDay"]["pct"] == 27.0
+        assert block["usageAgeSeconds"] == 5.0
+        assert "usageError" not in block
+        assert "codex" not in self._list(switcher, None, json_output=True)
 
 
 class TestListAccountsUsage:
