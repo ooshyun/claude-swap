@@ -270,7 +270,8 @@ def codex_block_text(
     now = now if now is not None else time.time()
     entry = codex.entry
     text = Text()
-    text.append("Codex", style=f"bold {palette.foreground}")
+    # Four columns stand in for an account card's "NN  " slot number.
+    text.append("    Codex", style=f"bold {palette.foreground}")
     if codex.plan:
         text.append(f"  [{codex.plan}]", style=palette.muted)
     age = data.format_age(entry.age_s)

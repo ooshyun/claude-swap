@@ -30,6 +30,17 @@ Screen {
     color: $secondary;
 }
 
+#watch-scroll {
+    height: 1fr;
+    background: $background;
+    scrollbar-size-vertical: 1;
+}
+
+#watch-scroll #accounts {
+    height: auto;
+    overflow-y: hidden;
+}
+
 #codex-panel {
     height: auto;
     padding: 0 3 1 3;
