@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
+    from claude_swap.codex_usage import CodexUsage
     from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -159,6 +160,8 @@ class AccountsSnapshot:
     active_number: str | None
     accounts: tuple[AccountSnapshot, ...]
     taken_at: float
+    #: Read-only Codex CLI usage; None when Codex is not set up.
+    codex: "CodexUsage | None" = None
 
 
 @dataclass
