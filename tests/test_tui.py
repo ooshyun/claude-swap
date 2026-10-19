@@ -1209,7 +1209,40 @@ class TestCodexBlock:
                 assert panel.display is shown
                 if shown:
                     plain = panel.render().plain
-                    assert "Codex  [plus]" in plain and "27%" in plain
+                    assert "    Codex  [plus]" in plain and "27%" in plain
+
+    async def test_watch_codex_sits_right_under_the_last_account(self, tmp_path):
+        app = make_app(FakeSwitcher(self._accounts(), tmp_path, codex=make_codex()))
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot)
+            from textual.widgets import ListView
+
+            accounts = app.screen.query_one("#accounts", ListView)
+            codex = app.screen.query_one("#codex-panel")
+            assert codex.region.y == accounts.region.bottom
+
+    async def test_watch_cursor_scrolls_into_view_past_the_screen(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(i, active=(i == 1)) for i in range(1, 9)],
+            tmp_path,
+            codex=make_codex(),
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot)
+            await pilot.press("s", *["down"] * 7)
+            await settle(pilot)
+            from textual.widgets import ListView
+
+            item = app.screen.query_one("#accounts", ListView).highlighted_child
+            assert item.number == "8"
+            assert app.screen.query_one("#watch-scroll").region.contains_region(
+                item.region
+            )
 
 
 @pytest.mark.asyncio

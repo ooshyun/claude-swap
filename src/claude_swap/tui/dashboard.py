@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Callable
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
@@ -379,9 +380,11 @@ class WatchScreen(AccountListScreen):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="list-title")
-        yield ListView(id="accounts")
-        # Outside the ListView: its index math assumes every row is an AccountItem.
-        yield CodexPanel(id="codex-panel")
+        # Codex sits right under the last account and scrolls with the list,
+        # but outside the ListView: its index math assumes AccountItem rows.
+        with VerticalScroll(id="watch-scroll"):
+            yield ListView(id="accounts")
+            yield CodexPanel(id="codex-panel")
         yield Footer()
 
     def __init__(self) -> None:
@@ -505,6 +508,14 @@ class WatchScreen(AccountListScreen):
         snap = self.app.snapshot
         if snap is not None:
             self.call_later(partial(self._on_snapshot, snap))
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        # The list grows to its content inside #watch-scroll, so its own
+        # scroll-to-cursor is a no-op; the outer scroller has to follow.
+        if event.item is not None:
+            self.query_one("#watch-scroll", VerticalScroll).scroll_to_widget(
+                event.item, animate=False
+            )
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if not self._selecting:
