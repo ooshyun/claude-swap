@@ -143,6 +143,13 @@ class AccountSnapshot:
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
 
     @property
+    def auto_target(self) -> bool:
+        """Whether auto-switch may pick this account: the same rule as
+        ``switchable_account_numbers``, so the auto view lists exactly the
+        engine's candidates."""
+        return self.switchable and not self.disabled
+
+    @property
     def display_tag(self) -> str:
         """Org tag for display: the org name, or 'personal'."""
         return self.org_name if self.org_name else "personal"

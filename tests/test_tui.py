@@ -1864,6 +1864,59 @@ class TestAutoScreen:
                 "user2@example.com"
             )
 
+    @pytest.mark.parametrize("expanded", [False, True])
+    async def test_disabled_account_is_not_a_candidate(
+        self, tmp_path, fake_engine, expanded
+    ):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(91.0, 20.0)),
+                make_account(2, entry=make_entry(15.0, 5.0), disabled=True),
+                make_account(3, entry=make_entry(80.0, 10.0)),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            await settle(pilot)
+            if expanded:
+                await pilot.press("e")
+                await pilot.pause()
+            from textual.widgets import Static
+
+            plain = app.screen.query_one("#candidates", Static).render().plain
+            assert "user3@example.com" in plain
+            assert "user2@example.com" not in plain
+
+    async def test_target_off_in_config_drops_the_candidate_after_going_live(
+        self, tmp_path, fake_engine
+    ):
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, entry=make_entry(91.0, 20.0)),
+                make_account(2, entry=make_entry(80.0, 10.0)),
+                make_account(3, entry=make_entry(15.0, 5.0)),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await self._open(pilot)
+            await settle(pilot)
+            await pilot.press("c")
+            await settle(pilot)
+            await pilot.press("down", "down", "down", "o")
+            await settle(pilot)
+            await pilot.press("escape", "l", "y")
+            await settle(pilot)
+            from textual.widgets import Static
+
+            assert ("set_disabled", "3", True) in fake.calls
+            plain = app.screen.query_one("#candidates", Static).render().plain
+            assert "user2@example.com" in plain
+            assert "user3@example.com" not in plain
+
     async def test_candidates_ranking_honors_configured_model(
         self, tmp_path, fake_engine
     ):

@@ -367,7 +367,7 @@ class AutoScreen(Screen):
         ranked: list[tuple[float, str]] = []  # (sort key: pct used, number)
         lines: dict[str, Text] = {}
         for acc in snap.accounts:
-            if acc.number == active_number or not acc.switchable:
+            if acc.number == active_number or not acc.auto_target:
                 continue
             pct = binding_pct(acc.usage.last_good, models)
             entry = Text()
@@ -403,7 +403,7 @@ class AutoScreen(Screen):
         models = parse_model_names(self._settings.model) if self._settings else ()
         ranked = []
         for acc in snap.accounts:
-            if acc.number == active_number or not acc.switchable:
+            if acc.number == active_number or not acc.auto_target:
                 continue
             if acc.usage.sentinel is not None:
                 key = 998.0
