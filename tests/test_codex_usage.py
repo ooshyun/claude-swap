@@ -131,6 +131,16 @@ def test_not_configured_returns_none(tmp_path, mode):
     assert net.requests == []
 
 
+def test_logout_hides_a_leftover_cache(tmp_path, home):
+    with patch("urllib.request.urlopen", _Net(_body())):
+        assert read_codex_usage(tmp_path / "cache", codex_home=home, now=NOW) is not None
+    _login(home, "apikey")
+    net = _Net(_body())
+    with patch("urllib.request.urlopen", net):
+        assert read_codex_usage(tmp_path / "cache", codex_home=home, now=NOW + 1) is None
+    assert net.requests == []
+
+
 def test_live_success_writes_cache_and_second_call_skips_network(tmp_path, home):
     net = _Net(_body())
     first = _read(tmp_path, home, net)

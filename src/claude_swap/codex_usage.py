@@ -225,7 +225,7 @@ def read_codex_usage(
     codex_home: Path | None = None,
     now: float | None = None,
 ) -> CodexUsage | None:
-    """Codex's current usage, or None when Codex is not set up.
+    """Codex's current usage, or None when Codex is not logged in.
 
     Served from ``<cache_dir>/codex_usage.json`` while it is younger than
     ``poll_policy.SERVE_TTL_S``; otherwise (``fetch=True`` only, and not within
@@ -241,7 +241,9 @@ def read_codex_usage(
         return _read(cache_path, cache, fetch, _codex_home(codex_home), now)
     except Exception as e:  # noqa: BLE001 - display-only data must not break callers
         _logger.debug("Codex usage read failed: %r", e)
-        return _to_result(cache, now) if cache else None
+        if cache is None or _read_login(_codex_home(codex_home)) is None:
+            return None
+        return _to_result(cache, now)
 
 
 def _read(
@@ -249,7 +251,9 @@ def _read(
 ) -> CodexUsage | None:
     login = _read_login(home)
     if login is None:
-        return _to_result(cache, now) if cache else None
+        # Logged out (or switched to an API key): a leftover cache would show
+        # a plan the user no longer has.
+        return None
 
     fetched = (cache or {}).get("fetchedAt")
     fresh = fetched is not None and now - fetched < poll_policy.SERVE_TTL_S

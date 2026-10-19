@@ -262,7 +262,6 @@ def codex_block_text(
     codex: CodexUsage,
     width: int,
     *,
-    threshold: float | None = None,
     now: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
@@ -285,7 +284,8 @@ def codex_block_text(
             note = ERROR_NOTES.get(entry.last_error, entry.last_error)
             text.append(f" · {note}", style=palette.muted)
         return text
-    _append_usage_bars(text, entry, rows, width, threshold=threshold, palette=palette)
+    # No threshold tick: it is the Claude auto-switch trigger, meaningless here.
+    _append_usage_bars(text, entry, rows, width, threshold=None, palette=palette)
     if codex.source == "session-log":
         text.append("\n    ")
         text.append("from last Codex session", style=palette.muted)
@@ -399,10 +399,7 @@ class AccountsPanel(Static):
                 blocks.append(mini_account_text(acc, now, palette=palette))
         if self._show_minis and snap.codex is not None:
             blocks.append(
-                codex_block_text(
-                    snap.codex, width, threshold=app.threshold_pct, now=now,
-                    palette=palette,
-                )
+                codex_block_text(snap.codex, width, now=now, palette=palette)
             )
         if not blocks:
             return Text("no active managed login", style=palette.muted)
@@ -438,7 +435,7 @@ class CodexPanel(Static):
         if snap is None or snap.codex is None:
             return Text("")
         return codex_block_text(
-            snap.codex, (self.size.width or 80) - 2, threshold=app.threshold_pct,
+            snap.codex, (self.size.width or 80) - 2,
             palette=Palette.from_theme(app.current_theme),
         )
 
