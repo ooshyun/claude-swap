@@ -82,6 +82,7 @@ class DashboardScreen(Screen):
             ("Disable / enable account…", "disable-menu"),
             ("Remove account…", "remove-menu"),
             ("Theme…", "theme-menu"),
+            ("Help", "help"),
             ("Quit", "quit"),
         ]
 
@@ -164,6 +165,7 @@ class DashboardScreen(Screen):
             "auto": app.action_open_auto,
             "add-login": app.action_add_current,
             "add-token": app.action_add_token,
+            "help": app.action_open_help,
             "quit": app.exit,
         }
         if action_id == "back":

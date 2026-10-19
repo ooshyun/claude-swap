@@ -215,6 +215,55 @@ class SettingInputModal(ModalScreen["SettingEdit | None"]):
         self.dismiss(None)
 
 
+HelpSection = tuple[str, list[tuple[str, str]]]  # (screen title, [(keys, what)])
+
+
+class HelpModal(ModalScreen[None]):
+    """Key reference for every screen, opened with ``?`` or the Help menu."""
+
+    BINDINGS = [
+        Binding("escape,q,enter,question_mark", "dismiss_modal", "Close", show=False)
+    ]
+
+    def __init__(self, sections: list[HelpSection]) -> None:
+        super().__init__()
+        self._sections = sections
+
+    def _body(self) -> Text:
+        width = max(
+            (len(keys) for _, rows in self._sections for keys, _ in rows), default=0
+        )
+        text = Text()
+        for i, (title, rows) in enumerate(self._sections):
+            if i:
+                text.append("\n")
+            text.append(f"{title}\n", style="bold")
+            for keys, what in rows:
+                text.append(f"  {keys.ljust(width)}  ", style="bold")
+                text.append(f"{what}\n")
+        text.append("\nEvery command outside the dashboard: cswap help")
+        return text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box modal-box-wide"):
+            yield Label("Help — keys", classes="modal-title")
+            with VerticalScroll(classes="modal-output", id="help-scroll"):
+                yield Static(self._body(), id="help-body")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Close", id="close")
+            yield Static("↑↓ scroll  ·  esc close", classes="modal-hint")
+
+    def on_mount(self) -> None:
+        # The list outgrows the box; focus the scroller so ↑↓ move it.
+        self.query_one("#help-scroll", VerticalScroll).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
+
+
 class OutputModal(ModalScreen[None]):
     """Scrollable display of captured (ANSI-colored) action output."""
 

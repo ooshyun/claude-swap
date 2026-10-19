@@ -23,7 +23,8 @@ from claude_swap.snapshot_source import account_identity
 from claude_swap.settings import load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
-from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+from claude_swap.tui.config_screen import ConfigScreen
+from claude_swap.tui.dashboard import DashboardScreen, SwitchScreen, WatchScreen
 from claude_swap.tui.data import (
     ActionResult,
     SnapshotSource,
@@ -31,7 +32,14 @@ from claude_swap.tui.data import (
     reorder_swaps,
     run_action,
 )
-from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
+from claude_swap.tui.modals import (
+    AddTokenModal,
+    ConfirmModal,
+    HelpModal,
+    HelpSection,
+    OutputModal,
+    TokenForm,
+)
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
 
@@ -43,7 +51,20 @@ class CswapApp(App):
     # No command palette: actions live in the dashboard's nested menu, in
     # their own context — not in a global searchable list.
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [Binding("ctrl+t", "toggle_theme", "Theme")]
+    BINDINGS = [
+        Binding("ctrl+t", "toggle_theme", "Theme"),
+        Binding("question_mark", "open_help", "Help"),
+    ]
+
+    # What the help screen lists, in menu order. Rows come from each screen's
+    # own BINDINGS, so a rebound key can never leave the help text behind.
+    HELP_SCREENS = (
+        ("Dashboard", DashboardScreen),
+        ("Switch account", SwitchScreen),
+        ("Watch accounts", WatchScreen),
+        ("Auto-switch view", AutoScreen),
+        ("Auto-switch config", ConfigScreen),
+    )
 
     POLL_INTERVAL_S = 3.0  # matches the old watch view's recapture cadence
     # Snapshot age stays hidden while polling is healthy (age never exceeds
@@ -427,6 +448,34 @@ class CswapApp(App):
         if isinstance(self.screen, WatchScreen):
             return
         self.push_screen(WatchScreen())
+
+    def action_open_help(self) -> None:
+        if isinstance(self.screen, HelpModal):
+            return
+        self.push_screen(HelpModal(self.help_sections()))
+
+    def help_sections(self) -> list[HelpSection]:
+        sections = [
+            (title, self._binding_rows(screen.BINDINGS))
+            for title, screen in self.HELP_SCREENS
+        ]
+        sections.append(("Everywhere", self._binding_rows(self.BINDINGS)))
+        return sections
+
+    def _binding_rows(self, bindings: list[Binding]) -> list[tuple[str, str]]:
+        """(keys, description) per described binding; bare cursor aliases
+        like j/k carry no description and stay out."""
+        return [
+            (
+                " / ".join(
+                    self.get_key_display(Binding(key, ""))
+                    for key in binding.key.split(",")
+                ),
+                binding.description,
+            )
+            for binding in bindings
+            if binding.description
+        ]
 
     # -- theme --------------------------------------------------------------
 
