@@ -117,6 +117,20 @@ Defaults like the threshold and cooldown are configurable with `cswap config set
 
 </details>
 
+#### Scheduled switches
+
+Queue a one-time switch for a set time, for example to move to a fresh account right as a window resets:
+
+```bash
+cswap schedule 2 23:30                  # next 23:30 (today, or tomorrow if it has passed)
+cswap schedule work 2026-11-18 09:00    # a date and time; accepts a number, email, or alias
+cswap schedule user@example.com +90m    # relative: +90m, +2h, +1h30m
+cswap schedule                          # list pending switches
+cswap schedule --cancel a1b2c3          # drop one by id (--json on the list for scripts)
+```
+
+There is no OS cron or launchd job behind this. The switch runs inside a live auto-switch engine: `cswap auto`, the dashboard's live auto view, or the menu bar with auto-switch on. If no engine is running at the time, the switch waits and fires on the next tick of whichever starts first (the list marks it `overdue`). It ignores the cooldown, may target a disabled account, and each entry fires at most once even with several engines running.
+
 ### Run multiple accounts at the same time (session mode)
 
 Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.
@@ -237,7 +251,7 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 | macOS | macOS Keychain | `~/.claude-swap-backup/` |
 | Linux / WSL | File-based (inside the backup directory, under `credentials/`) | `${XDG_DATA_HOME:-~/.local/share}/claude-swap/` |
 
-Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) live in the backup directory root.
+Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) and pending scheduled switches (`autoswitch_schedule.json`) live in the backup directory root.
 
 On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 

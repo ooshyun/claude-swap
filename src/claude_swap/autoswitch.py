@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar
 
-from claude_swap import oauth, poll_policy
+from claude_swap import oauth, poll_policy, schedule
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
 from claude_swap.locking import FileLock
@@ -362,7 +362,7 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first"
+    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first" | "scheduled"
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
@@ -386,6 +386,8 @@ class SwitchEvent(AutoSwitchEvent):
             if self.to_ref
             else "?"
         )
+        if self.trigger == "scheduled" and not self.dry_run:
+            return f"Scheduled switch {src} -> {dst}"
         prefix = "[dry-run] would switch" if self.dry_run else "Switched"
         return f"{prefix} {src} -> {dst} ({self.trigger})"
 
@@ -949,6 +951,10 @@ class AutoSwitchEngine:
         self._blocked_wait_long = False
         self._idle_hold_slow = False
         settings = self.settings
+        if not self.dry_run:
+            scheduled = self._run_due_schedule()
+            if scheduled is not None:
+                return scheduled
         state = self._read_state()
         if not self.dry_run:
             # Dry-run must not write anything, so recovered quarantines are
@@ -2158,12 +2164,41 @@ class AutoSwitchEngine:
         headroom = _headroom_by_account(usage, self._models, models_for=self._models_for)
         return entries, usage, headroom
 
+    def _run_due_schedule(self) -> TickOutcome | None:
+        """Fire at most one due scheduled switch; ``None`` when nothing was due.
+
+        Runs before every other gate: an explicit request neither waits on
+        usage readings nor on cooldown. The entry is claimed (removed) first,
+        so a failed switch is not retried by this or any other engine.
+        """
+        # Most installs have no schedule; skip even the clock read for them.
+        if schedule.next_due_at(self.switcher.backup_dir) is None:
+            return None
+        try:
+            entry = schedule.claim_due(self.switcher.backup_dir, self.clock())
+        except ClaudeSwitchError as e:
+            # A busy schedule lock must not stall the threshold logic.
+            _logger.debug("schedule claim skipped: %s", e)
+            return None
+        if entry is None:
+            return None
+        label = f"scheduled switch {entry.id} to Account-{entry.number} ({entry.email})"
+        try:
+            number = entry.number
+            if self.switcher.account_email(number) != entry.email:
+                # Slots get renumbered by swap/move; follow the email.
+                number, _, _ = self.switcher.resolve_account(entry.email)
+            return self._perform(number, entry.email, "scheduled", None)
+        except ClaudeSwitchError as e:
+            self._emit(ErrorEvent(message=f"{label} failed: {e}", transient=True))
+            return TickOutcome.ERROR
+
     def _perform(
         self,
         number: str,
         email: str,
         trigger: str,
-        left: tuple[float | None, float],
+        left: tuple[float | None, float] | None,
     ) -> TickOutcome:
         if self.dry_run:
             current = self.switcher.current_account_number()
@@ -2210,8 +2245,17 @@ class AutoSwitchEngine:
             # portable JSON, and every other reader of this file would have to
             # learn about it.
             state["lastSwitchFrom"] = (result.get("from") or {}).get("number")
-            state["leftHeadroom"], recovery = left
-            state["leftRecoveryAt"] = None if recovery == float("inf") else recovery
+            if left is None:
+                # Explicit user intent has no departure snapshot, and the
+                # no-return bar must not treat it as an automatic move.
+                for key in ("leftHeadroom", "leftRecoveryAt", "leftTrigger"):
+                    state.pop(key, None)
+                state["lastSwitchFrom"] = None
+            else:
+                state["leftHeadroom"], recovery = left
+                state["leftRecoveryAt"] = (
+                    None if recovery == float("inf") else recovery
+                )
             # A `consume-first` phase-2 refetch can write the SAME (None,
             # None) shape a `failover` departure writes, whenever the
             # refetched active row has a `pct` but is otherwise unmeasurable
@@ -2220,7 +2264,8 @@ class AutoSwitchEngine:
             # needs only `resets_at`. Inferring the trigger from the two
             # nulls then runs the wrong legs. Record it directly so the
             # reader never has to guess.
-            state["leftTrigger"] = trigger
+            if left is not None:
+                state["leftTrigger"] = trigger
             atomic_write_json(self.state_path, state)
 
         self._emit(
@@ -2349,6 +2394,15 @@ class AutoSwitchEngine:
         self.switcher.set_poll_policy_inputs(*self._poll_inputs())
 
     def _next_delay(self, outcome: TickOutcome) -> float:
+        delay = self._cadence_delay(outcome)
+        if self.dry_run:
+            return delay
+        due = schedule.next_due_at(self.switcher.backup_dir)
+        if due is None:
+            return delay
+        return min(delay, max(due - self.clock(), 1.0))
+
+    def _cadence_delay(self, outcome: TickOutcome) -> float:
         interval = self.settings.interval_seconds
         if outcome is TickOutcome.BLOCKED:
             if self._sleep_until_ts is not None:

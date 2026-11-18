@@ -6,13 +6,14 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_swap import __version__
-from claude_swap import cli
+from claude_swap import cli, schedule
 from claude_swap.credentials import ActiveCredentials
 from claude_swap.switcher import ClaudeAccountSwitcher
 
@@ -1767,3 +1768,101 @@ def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
     home = Path(_subprocess_env()["HOME"])
     assert home.is_dir(), f"the isolated HOME is not a real directory: {home}"
     assert home.is_relative_to(tmp_path_factory.getbasetemp()), f"{home} escapes basetemp"
+
+
+class TestScheduleCommand:
+    """`cswap schedule` - queue, list and cancel scheduled switches."""
+
+    def _seeded(self, temp_home):
+        return TestAliasCommand()._seeded_switcher_env(temp_home)
+
+    def _run(self, argv):
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._schedule_command(argv)
+
+    def test_add_by_number_joins_spaced_when(self, temp_home, capsys):
+        switcher = self._seeded(temp_home)
+        self._run(["2", "2099-11-18", "09:00"])
+
+        [entry] = schedule.pending(switcher.backup_dir)
+        assert entry.number == "2" and entry.email == "work@co.com"
+        assert entry.at == datetime(2099, 11, 18, 9, 0).timestamp()
+        out = capsys.readouterr().out
+        assert entry.id in out and "work@co.com" in out and "2099-11-18 09:00" in out
+        assert "Runs while an auto-switch engine is live" in out
+
+    def test_add_by_email_and_alias(self, temp_home):
+        switcher = self._seeded(temp_home)
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        switcher._write_json(switcher.sequence_file, data)
+        self._run(["work@co.com", "+1h"])
+        self._run(["dev", "+2h"])
+        assert [e.number for e in schedule.pending(switcher.backup_dir)] == ["2", "2"]
+
+    def test_unknown_account_exits_1(self, temp_home, capsys):
+        switcher = self._seeded(temp_home)
+        with pytest.raises(SystemExit) as exc:
+            self._run(["9", "+1h"])
+        assert exc.value.code == 1
+        assert schedule.pending(switcher.backup_dir) == []
+
+    def test_past_time_exits_1(self, temp_home, capsys):
+        self._seeded(temp_home)
+        with pytest.raises(SystemExit) as exc:
+            self._run(["2", "2000-01-01 09:00"])
+        assert exc.value.code == 1
+        assert "past" in capsys.readouterr().err
+
+    def test_list_empty_and_populated(self, temp_home, capsys):
+        switcher = self._seeded(temp_home)
+        self._run([])
+        assert "No scheduled switches" in capsys.readouterr().out
+
+        entry = schedule.add(
+            switcher.backup_dir, "2", "work@co.com", 1.0, now=0.0
+        )
+        later = schedule.add(
+            switcher.backup_dir, "2", "work@co.com", 4102444800.0, now=0.0
+        )
+        self._run([])
+        lines = capsys.readouterr().out.splitlines()
+        overdue = next(l for l in lines if entry.id in l)
+        assert "Account-2" in overdue and "work@co.com" in overdue
+        assert "overdue" in overdue
+        assert "overdue" not in next(l for l in lines if later.id in l)
+
+    def test_list_json(self, temp_home, capsys):
+        switcher = self._seeded(temp_home)
+        entry = schedule.add(
+            switcher.backup_dir, "2", "work@co.com", 4102444800.0, now=5.0
+        )
+        self._run(["--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["pending"] == [{
+            "id": entry.id, "number": "2", "email": "work@co.com",
+            "at": 4102444800.0, "createdAt": 5.0, "overdue": False,
+        }]
+
+    def test_cancel(self, temp_home, capsys):
+        switcher = self._seeded(temp_home)
+        entry = schedule.add(
+            switcher.backup_dir, "2", "work@co.com", 4102444800.0, now=0.0
+        )
+        self._run(["--cancel", entry.id])
+        assert schedule.pending(switcher.backup_dir) == []
+        assert entry.id in capsys.readouterr().out
+
+    def test_cancel_unknown_id_exits_1(self, temp_home, capsys):
+        self._seeded(temp_home)
+        with pytest.raises(SystemExit) as exc:
+            self._run(["--cancel", "nope00"])
+        assert exc.value.code == 1
+        assert "nope00" in capsys.readouterr().err
+
+    def test_main_dispatches_schedule(self, temp_home, capsys):
+        self._seeded(temp_home)
+        with patch.object(sys, "argv", ["cswap", "schedule"]), \
+                patch("os.geteuid", return_value=1000, create=True):
+            cli.main()
+        assert "No scheduled switches" in capsys.readouterr().out

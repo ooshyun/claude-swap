@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap import oauth, poll_policy
+from claude_swap import oauth, poll_policy, schedule
 from claude_swap.autoswitch import (
     IDLE_HOLD_MAX_S,
     NO_RESET_FALLBACK_S,
@@ -317,6 +317,119 @@ class TestEngineHarnessIsolation:
         assert h2.switcher._get_sequence_data()["accounts"]["1"]["email"] == (
             "z@example.com"
         ), "h1's seed() bled into h2's store"
+
+
+class TestScheduledSwitch:
+    def _add(self, harness, number, email, in_seconds):
+        return schedule.add(
+            harness.switcher.backup_dir, str(number), email,
+            harness.clock() + in_seconds, harness.clock(),
+        )
+
+    def _quiet_usage(self):
+        return {"1": _usage(10), "2": _usage(10), "3": _usage(10)}
+
+    def test_due_entry_switches_to_target(self, harness):
+        self._add(harness, 2, "b@example.com", -5)
+        outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+        assert harness.state()["lastSwitchTo"] == "2"
+        assert schedule.pending(harness.switcher.backup_dir) == []
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "scheduled"
+        assert switch.human().startswith("Scheduled switch Account-1 -> Account-2")
+
+    def test_not_yet_due_entry_does_nothing(self, harness):
+        entry = self._add(harness, 2, "b@example.com", 600)
+        outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+        assert schedule.pending(harness.switcher.backup_dir) == [entry]
+
+    def test_dry_run_engine_leaves_entry_and_does_not_switch(self, harness):
+        harness.engine = harness._make_engine(dry_run=True)
+        entry = self._add(harness, 2, "b@example.com", -5)
+        harness.tick_with_usage(self._quiet_usage())
+        assert harness.active_number() == 1
+        assert schedule.pending(harness.switcher.backup_dir) == [entry]
+        assert not any(isinstance(e, SwitchEvent) for e in harness.events)
+
+    def test_switches_inside_cooldown_and_records_it(self, harness):
+        harness.engine._mutate_state(
+            lambda s: s.update(lastSwitchAt=harness.clock() - 10)
+        )
+        self._add(harness, 3, "c@example.com", -1)
+        outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+        assert harness.state()["lastSwitchAt"] == harness.clock()
+
+    def test_disabled_target_is_allowed(self, harness):
+        harness.switcher.set_account_disabled("2", True)
+        self._add(harness, 2, "b@example.com", -1)
+        assert harness.tick_with_usage(self._quiet_usage()) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    def test_only_one_entry_per_tick(self, harness):
+        self._add(harness, 2, "b@example.com", -20)
+        self._add(harness, 3, "c@example.com", -10)
+        harness.tick_with_usage(self._quiet_usage())
+        assert harness.active_number() == 2
+        assert [e.number for e in schedule.pending(harness.switcher.backup_dir)] == ["3"]
+        harness.tick_with_usage(self._quiet_usage())
+        assert harness.active_number() == 3
+
+    def test_renumbered_slot_follows_the_email(self, harness):
+        self._add(harness, 2, "b@example.com", -1)
+        harness.switcher.swap_accounts("2", "3")
+        assert harness.switcher.account_email("3") == "b@example.com"
+        outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+        assert harness.state()["lastSwitchTo"] == "3"
+
+    def test_removed_email_reports_error_and_drops_entry(self, harness):
+        self._add(harness, 2, "gone@example.com", -1)
+        outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.ERROR
+        assert harness.active_number() == 1
+        assert schedule.pending(harness.switcher.backup_dir) == []
+        error = next(e for e in harness.events if isinstance(e, ErrorEvent))
+        assert "scheduled switch" in error.message
+        assert "gone@example.com" in error.message
+
+    def test_failed_switch_names_the_schedule_and_stays_consumed(self, harness):
+        from claude_swap.exceptions import SwitchError
+
+        entry = self._add(harness, 2, "b@example.com", -1)
+        with patch.object(
+            harness.switcher, "switch_to", side_effect=SwitchError("boom")
+        ):
+            outcome = harness.tick_with_usage(self._quiet_usage())
+        assert outcome is TickOutcome.ERROR
+        assert schedule.pending(harness.switcher.backup_dir) == []
+        error = next(e for e in harness.events if isinstance(e, ErrorEvent))
+        assert entry.id in error.message and "Account-2" in error.message
+        assert "boom" in error.message
+
+    def test_next_delay_is_clamped_to_the_due_time(self, harness):
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) > 40
+        self._add(harness, 2, "b@example.com", 17)
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 17
+
+    def test_next_delay_never_below_one_second(self, harness):
+        self._add(harness, 2, "b@example.com", -100)
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) == 1.0
+
+    def test_next_delay_clamps_a_long_blocked_sleep(self, harness):
+        self._add(harness, 2, "b@example.com", 30)
+        assert harness.engine._next_delay(TickOutcome.BLOCKED) <= 30
+
+    def test_dry_run_delay_ignores_schedule(self, harness):
+        harness.engine = harness._make_engine(dry_run=True)
+        self._add(harness, 2, "b@example.com", 5)
+        assert harness.engine._next_delay(TickOutcome.NO_ACTION) > 40
 
 
 class TestDecisionTable:
