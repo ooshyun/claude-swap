@@ -6,10 +6,12 @@ import argparse
 import json
 import os
 import sys
+import time
+from datetime import datetime
 
-from claude_swap import __version__, paths, printer
+from claude_swap import __version__, paths, printer, schedule
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.json_output import error_envelope
+from claude_swap.json_output import SCHEMA_VERSION, error_envelope
 from claude_swap.printer import (
     accent,
     bolded,
@@ -573,6 +575,104 @@ Examples:
         sys.exit(130)
 
 
+def _schedule_command(argv: list[str]) -> None:
+    """Handle `cswap schedule [NUM|EMAIL|ALIAS WHEN] [--cancel ID] [--json]`.
+
+    With no arguments, lists pending scheduled switches. The switch itself is
+    performed by whichever auto-switch engine is live when the time comes.
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap schedule",
+        description=(
+            "Switch the live login to an account at a given time. The switch "
+            "runs inside a live auto-switch engine (cswap auto, the "
+            "dashboard's live auto view, or the menu bar with auto-switch on)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+WHEN is HH:MM (next occurrence), YYYY-MM-DD HH:MM, an ISO-8601 timestamp, or
+a relative +90m / +2h / +1h30m.
+
+Examples:
+  cswap schedule 2 23:30
+  cswap schedule work 2026-11-18 09:00
+  cswap schedule user@example.com +90m
+  cswap schedule                      # list pending
+  cswap schedule --cancel a1b2c3
+        """,
+    )
+    parser.add_argument(
+        "target",
+        nargs=argparse.REMAINDER,
+        metavar="NUM|EMAIL|ALIAS WHEN",
+        help="Account to switch to, then when. Omit to list pending switches.",
+    )
+    parser.add_argument("--cancel", metavar="ID", help="Remove a pending switch")
+    parser.add_argument("--json", action="store_true", help="List as JSON")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    def local(ts: float) -> str:
+        return datetime.fromtimestamp(ts).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        _guard_root(switcher)
+        backup_dir = switcher.backup_dir
+
+        if args.cancel:
+            if not schedule.cancel(backup_dir, args.cancel):
+                error(f"Error: no scheduled switch with id {args.cancel}")
+                sys.exit(1)
+            print(f"{accent('Cancelled')} scheduled switch {args.cancel}")
+            return
+
+        if not args.target:
+            now = time.time()
+            entries = schedule.pending(backup_dir)
+            if args.json:
+                print(json.dumps({
+                    "schemaVersion": SCHEMA_VERSION,
+                    "pending": [
+                        {**e.to_json(), "overdue": e.at <= now} for e in entries
+                    ],
+                }, indent=2))
+                return
+            if not entries:
+                print(dimmed("No scheduled switches"))
+                return
+            print(bolded("Scheduled switches:"))
+            for e in entries:
+                overdue = "  (overdue)" if e.at <= now else ""
+                print(
+                    f"  {e.id}  Account-{e.number} {muted(f'({e.email})')}  "
+                    f"{local(e.at)}{overdue}"
+                )
+            return
+
+        if len(args.target) < 2:
+            parser.error("expected NUM|EMAIL|ALIAS and WHEN")
+        identifier, when = args.target[0], " ".join(args.target[1:])
+        number, email, _ = switcher.resolve_account(identifier)
+        now = datetime.now()
+        at = schedule.parse_when(when, now)
+        entry = schedule.add(backup_dir, number, email, at, now.timestamp())
+        print(
+            f"{accent('Scheduled')} {entry.id}: switch to Account-{number} "
+            f"({email}) at {local(at)}"
+        )
+        print(dimmed(
+            "Runs while an auto-switch engine is live (cswap auto, the "
+            "dashboard's live auto view, or the menu bar with auto-switch on)."
+        ))
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -1098,6 +1198,9 @@ def main() -> None:
     if argv and argv[0] == "alias":
         _alias_command(argv[1:])
         return
+    if argv and argv[0] == "schedule":
+        _schedule_command(argv[1:])
+        return
     if argv and argv[0] == "swap":
         _swap_command(argv[1:])
         return
@@ -1143,6 +1246,8 @@ Commands:
   %(prog)s swap <a> <b>               exchange two accounts' slot numbers
   %(prog)s move <a> <slot>            assign an account to a slot (swaps if taken)
   %(prog)s auto                       auto-switch when nearing rate limits
+  %(prog)s schedule <num|email> <when> switch to an account at a set time
+  %(prog)s schedule                   list pending scheduled switches
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts
